@@ -1,13 +1,21 @@
-# Asimos Backend (Mock)
+# Asimos Backend (Render + Supabase)
 
-## Run
+## Local run
 ```bash
+cp .env.example .env
 npm install
 npm run dev
 ```
 
-API: http://localhost:4000
+## Render config
+Create a Web Service (Node/Express). Set:
+- Root Directory: `backend`
+- Build Command: `npm install`
+- Start Command: `npm start`
 
-## Seed users
-- Satıcı (işçi axtaran / employer): `employer@test.com` / `Password123!`
-- Alıcı (iş axtaran / seeker): `seeker@test.com` / `Password123!`
+Environment Variables (Render Dashboard):
+- SUPABASE_URL
+- SUPABASE_ANON_KEY
+- SUPABASE_SERVICE_ROLE_KEY
+
+> Service role key is **server-only**. Never put it in mobile.
