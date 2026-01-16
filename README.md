@@ -19,3 +19,11 @@ Environment Variables (Render Dashboard):
 - SUPABASE_SERVICE_ROLE_KEY
 
 > Service role key is **server-only**. Never put it in mobile.
+
+
+## Geo
+- `GET /geo/search?q=...` — Azerbaijan geocode proxy (Nominatim).
+
+
+## Refresh token
+- `POST /auth/refresh` body: `{ refreshToken }` -> returns new `{ token, refreshToken, user }`.

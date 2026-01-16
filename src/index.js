@@ -98,10 +98,14 @@ async function requireAuth(req, res, next) {
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // Register (uses admin API to create user, auto-confirm)
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Register -> sends Email OTP (confirmation) via Supabase Auth
 app.post("/auth/register", async (req, res) => {
   try {
     const {
-      role,           // seeker | employer
+      role, // seeker | employer
       fullName,
       companyName,
       email,
@@ -117,40 +121,83 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+    // Create user (requires Email Confirmations enabled in Supabase).
+    // Store extra registration fields in user_metadata to build profile after OTP verify.
+    const { data, error } = await supabaseAnon.auth.signUp({
       email,
       password,
-      email_confirm: true,
+      options: {
+        data: {
+          role,
+          fullName,
+          companyName: role === "employer" ? (companyName || null) : null,
+          phone: phone || null,
+          location: location || null,
+        },
+      },
     });
 
-    if (createErr) return res.status(400).json({ error: createErr.message });
-    const userId = created.user.id;
+    if (error) return res.status(400).json({ error: error.message });
 
-    const { error: profErr } = await supabaseAdmin.from("profiles").insert({
-      id: userId,
-      role,
-      full_name: fullName,
-      company_name: role === "employer" ? (companyName || null) : null,
-      phone: phone || null,
-      location: location || null,
-    });
-
-    if (profErr) return res.status(400).json({ error: profErr.message });
-
-    // Sign in to return a user token
-    const { data: signin, error: signErr } = await supabaseAnon.auth.signInWithPassword({ email, password });
-    if (signErr) return res.status(400).json({ error: signErr.message });
-
-    const profile = await getProfile(userId);
+    const needsOtp = !data?.session;
 
     return res.json({
-      token: signin.session.access_token,
-      user: profileToUser(profile, signin.user),
+      ok: true,
+      needsOtp,
+      email,
+      message: needsOtp ? "OTP kod emailə göndərildi" : "Qeydiyyat tamamlandı",
+      token: data?.session?.access_token || null,
+      refreshToken: data?.session?.refresh_token || null,
+      user: data?.user ? profileToUser(null, data.user) : null,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
+
+
+
+// Geocode proxy (Nominatim) — Azerbaijan focused
+app.get("/geo/search", async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.status(400).json({ error: "q is required" });
+
+    // Azerbaijan bounding box (approx): left,top,right,bottom
+    const viewbox = "44.73,41.95,50.62,38.30";
+    const url =
+      "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5" +
+      "&addressdetails=1&accept-language=az&countrycodes=az&bounded=1" +
+      "&viewbox=" + encodeURIComponent(viewbox) +
+      "&q=" + encodeURIComponent(q);
+
+    const r = await fetch(url, {
+      headers: {
+        "Accept": "application/json",
+        // Identify the app as per Nominatim usage guidance (server-side is fine)
+        "User-Agent": "Asimos/1.0 (render-backend)",
+      },
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(502).json({ error: "Geocode failed", status: r.status, body: t.slice(0, 300) });
+    }
+
+    const data = await r.json();
+    // Normalize fields
+    const out = (data || []).map((x) => ({
+      display_name: x.display_name,
+      lat: Number(x.lat),
+      lon: Number(x.lon),
+    })).filter(x => Number.isFinite(x.lat) && Number.isFinite(x.lon));
+
+    return res.json(out);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 
 // Login
 app.post("/auth/login", async (req, res) => {
@@ -165,12 +212,131 @@ app.post("/auth/login", async (req, res) => {
 
     return res.json({
       token: signin.session.access_token,
+      refreshToken: signin.session.refresh_token,
       user: profileToUser(profile, signin.user),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
+
+
+// Verify Email OTP and return session tokens + create profile
+app.post("/auth/verify-otp", async (req, res) => {
+  try {
+    const { email, code } = req.body || {};
+    if (!email || !code) return res.status(400).json({ error: "Missing fields" });
+
+    const { data, error } = await supabaseAnon.auth.verifyOtp({
+      email,
+      token: code,
+      type: "email",
+    });
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!data?.user || !data?.session) return res.status(400).json({ error: "OTP doğrulanmadı" });
+
+    const userId = data.user.id;
+
+    const md = data.user.user_metadata || {};
+    const role = md.role;
+    const fullName = md.fullName || "";
+    const companyName = md.companyName || null;
+    const phone = md.phone || null;
+    const location = md.location || null;
+
+    const { error: profErr } = await supabaseAdmin.from("profiles").upsert({
+      id: userId,
+      role,
+      full_name: fullName,
+      company_name: companyName,
+      phone,
+      location,
+    });
+
+    if (profErr) return res.status(400).json({ error: profErr.message });
+
+    const profile = await getProfile(userId);
+
+    return res.json({
+      token: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+      user: profileToUser(profile, data.user),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Resend signup confirmation OTP email
+app.post("/auth/resend-otp", async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: "email required" });
+
+    const { error } = await supabaseAnon.auth.resend({
+      type: "signup",
+      email,
+    });
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ok: true, message: "OTP yenidən göndərildi" });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+
+
+// Refresh access token using refresh_token (Supabase Auth)
+app.post("/auth/refresh", async (req, res) => {
+  try {
+    const refreshToken = req.body?.refreshToken;
+    if (!refreshToken) return res.status(400).json({ error: "refreshToken required" });
+
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      return res.status(500).json({ error: "Supabase env not configured" });
+    }
+
+    const url = `${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`;
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+
+    const data = await r.json().catch(() => null);
+
+    if (!r.ok) {
+      const msg = data?.msg || data?.error_description || data?.error || "Refresh failed";
+      return res.status(401).json({ error: msg });
+    }
+
+    const accessToken = data?.access_token;
+    const newRefresh = data?.refresh_token;
+    const userId = data?.user?.id;
+
+    if (!accessToken || !userId) {
+      return res.status(401).json({ error: "Invalid refresh response" });
+    }
+
+    const profile = await getProfile(userId);
+
+    return res.json({
+      token: accessToken,
+      refreshToken: newRefresh || refreshToken,
+      user: profileToUser(profile, data.user),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 
 // Update my location
 app.patch("/me/location", requireAuth, async (req, res) => {
