@@ -101,7 +101,7 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Register -> sends Email OTP (confirmation) via Supabase Auth
+// Register -> sends EMAIL OTP code via Supabase Auth (password is set after OTP verification)
 app.post("/auth/register", async (req, res) => {
   try {
     const {
@@ -121,12 +121,14 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    // Create user (requires Email Confirmations enabled in Supabase).
-    // Store extra registration fields in user_metadata to build profile after OTP verify.
-    const { data, error } = await supabaseAnon.auth.signUp({
+    // EMAIL OTP (6 rəqəmli kod) göndər.
+    // Qeyd: `signInWithOtp` default olaraq Magic Link email template-ni istifadə edir.
+    // 6 rəqəmli OTP görmək üçün Supabase Dashboard > Auth > Email Templates > Magic Link
+    // template-inə `{{ .Token }}` əlavə edilməlidir.
+    const { data, error } = await supabaseAnon.auth.signInWithOtp({
       email,
-      password,
       options: {
+        shouldCreateUser: true,
         data: {
           role,
           fullName,
@@ -137,17 +139,23 @@ app.post("/auth/register", async (req, res) => {
       },
     });
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      const msg = error.message || "Auth error";
+      const lower = msg.toLowerCase();
+      if (lower.includes("rate") && lower.includes("limit")) {
+        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
+      }
+      return res.status(400).json({ error: msg });
+    }
 
-    const needsOtp = !data?.session;
-
+    // OTP axınında session adətən NULL olur.
     return res.json({
       ok: true,
-      needsOtp,
+      needsOtp: true,
       email,
-      message: needsOtp ? "OTP kod emailə göndərildi" : "Qeydiyyat tamamlandı",
-      token: data?.session?.access_token || null,
-      refreshToken: data?.session?.refresh_token || null,
+      message: "OTP sorğusu göndərildi. Əgər emaildə 6 rəqəmli kod görünmürsə, Supabase Dashboard > Auth > Email Templates > Magic Link template-inə {{ .Token }} əlavə edin. Email ümumiyyətlə gəlmirsə, Supabase-də Custom SMTP qoşmaq lazımdır (deliverability).",
+      token: null,
+      refreshToken: null,
       user: data?.user ? profileToUser(null, data.user) : null,
     });
   } catch (e) {
@@ -224,16 +232,29 @@ app.post("/auth/login", async (req, res) => {
 // Verify Email OTP and return session tokens + create profile
 app.post("/auth/verify-otp", async (req, res) => {
   try {
-    const { email, code } = req.body || {};
+    const { email, code, password } = req.body || {};
     if (!email || !code) return res.status(400).json({ error: "Missing fields" });
+    if (!password) return res.status(400).json({ error: "Password required" });
+
+    const cleanCode = String(code).replace(/\s+/g, "").trim();
+    if (!/^\d{6}$/.test(cleanCode)) {
+      return res.status(400).json({ error: "OTP kod 6 rəqəmli olmalıdır" });
+    }
 
     const { data, error } = await supabaseAnon.auth.verifyOtp({
       email,
-      token: code,
+      token: cleanCode,
       type: "email",
     });
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      const msg = error.message || "Auth error";
+      const lower = msg.toLowerCase();
+      if (lower.includes("rate") && lower.includes("limit")) {
+        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
+      }
+      return res.status(400).json({ error: msg });
+    }
     if (!data?.user || !data?.session) return res.status(400).json({ error: "OTP doğrulanmadı" });
 
     const userId = data.user.id;
@@ -256,6 +277,14 @@ app.post("/auth/verify-otp", async (req, res) => {
 
     if (profErr) return res.status(400).json({ error: profErr.message });
 
+    // Set password after OTP verification so user can login with email+password
+    try {
+      const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(userId, { password });
+      if (updErr) return res.status(400).json({ error: updErr.message });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || "Password set failed" });
+    }
+
     const profile = await getProfile(userId);
 
     return res.json({
@@ -268,19 +297,27 @@ app.post("/auth/verify-otp", async (req, res) => {
   }
 });
 
-// Resend signup confirmation OTP email
+// Resend signup confirmation email
 app.post("/auth/resend-otp", async (req, res) => {
   try {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: "email required" });
 
-    const { error } = await supabaseAnon.auth.resend({
-      type: "signup",
+    // OTP yenidən göndərmək üçün eyni OTP axınını çağırırıq.
+    const { error } = await supabaseAnon.auth.signInWithOtp({
       email,
+      options: { shouldCreateUser: true },
     });
 
-    if (error) return res.status(400).json({ error: error.message });
-    return res.json({ ok: true, message: "OTP yenidən göndərildi" });
+    if (error) {
+      const msg = error.message || "Auth error";
+      const lower = msg.toLowerCase();
+      if (lower.includes("rate") && lower.includes("limit")) {
+        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
+      }
+      return res.status(400).json({ error: msg });
+    }
+    return res.json({ ok: true, message: "OTP kod yenidən göndərildi" });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
