@@ -2,10 +2,18 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve static assets from /public (e.g. /logo.png)
+// Put your logo at: <project_root>/public/logo.png
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use(express.static(path.join(__dirname, "..", "public")));
 
 const PORT = process.env.PORT || 4000;
 
@@ -237,8 +245,10 @@ app.post("/auth/verify-otp", async (req, res) => {
     if (!password) return res.status(400).json({ error: "Password required" });
 
     const cleanCode = String(code).replace(/\s+/g, "").trim();
-    if (!/^\d{6}$/.test(cleanCode)) {
-      return res.status(400).json({ error: "OTP kod 6 rəqəmli olmalıdır" });
+    // Supabase Email OTP length can be configured in Dashboard (6 or 8 digits).
+    // We accept both so the app keeps working while you switch it to 6 digits.
+    if (!/^\d{6,8}$/.test(cleanCode)) {
+      return res.status(400).json({ error: "OTP kod 6 (və ya 8) rəqəmli olmalıdır" });
     }
 
     const { data, error } = await supabaseAnon.auth.verifyOtp({
