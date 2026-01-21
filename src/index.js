@@ -21,16 +21,108 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn("Missing Supabase env vars. Please set SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY");
+// Some deploys forget to set SUPABASE_ANON_KEY on Render.
+// Server-side, the service role key can safely be used for Auth calls as a fallback.
+const SUPABASE_AUTH_KEY = SUPABASE_ANON_KEY || SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_AUTH_KEY) {
+  console.warn("Missing Supabase env vars. Please set SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and (SUPABASE_ANON_KEY or use service role as fallback)");
 }
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
-const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_AUTH_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
+
+// Expo push notifications (optional)
+// NOTE: To fully enable push, add `expo_push_token` TEXT column to `profiles` table.
+// Example SQL:
+//   alter table public.profiles add column if not exists expo_push_token text;
+const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < (arr?.length || 0); i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function sendExpoPush(messages) {
+  if (!messages?.length) return { ok: true, sent: 0 };
+
+  // Expo recommends max 100 messages per request
+  const batches = chunk(messages, 100);
+  let sent = 0;
+
+  for (const batch of batches) {
+    const r = await fetch(EXPO_PUSH_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(batch),
+    });
+
+    const data = await r.json().catch(() => null);
+    if (!r.ok) {
+      console.warn("Expo push send failed", r.status, data);
+      continue;
+    }
+    sent += batch.length;
+  }
+  return { ok: true, sent };
+}
+
+async function notifyNearbySeekers(job) {
+  try {
+    const lat = toNum(job?.location?.lat);
+    const lng = toNum(job?.location?.lng);
+    if (lat === null || lng === null) return { ok: false, reason: "no_job_location" };
+
+    const radiusM = toNum(job?.notifyRadiusM) ?? 500;
+    if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
+
+    const { data: profiles, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, full_name, location, expo_push_token")
+      .in("role", ["seeker", "alici", "is axtaran", "is_axtaran"])
+      .limit(2000);
+
+    if (error) {
+      console.warn("notifyNearbySeekers: profile fetch failed", error.message);
+      return { ok: false, reason: "profile_fetch_failed" };
+    }
+
+    const messages = [];
+    for (const p of profiles || []) {
+      const token = p?.expo_push_token;
+      if (!token || typeof token !== "string") continue;
+      const pl = p?.location || null;
+      const plat = toNum(pl?.lat);
+      const plng = toNum(pl?.lng);
+      if (plat === null || plng === null) continue;
+
+      const d = haversineDistanceM(lat, lng, plat, plng);
+      if (d <= radiusM) {
+        messages.push({
+          to: token,
+          sound: "default",
+          title: "Yaxınlıqda iş var",
+          body: job?.title ? `\"${job.title}\" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.",
+          data: { type: "job", job },
+        });
+      }
+    }
+
+    const res = await sendExpoPush(messages);
+    return { ok: true, candidates: profiles?.length || 0, notified: messages.length, sent: res.sent };
+  } catch (e) {
+    console.warn("notifyNearbySeekers error", e);
+    return { ok: false, reason: "exception" };
+  }
+}
 
 function toNum(v) {
   const n = Number(v);
@@ -62,10 +154,58 @@ function bbox(lat, lng, radiusM) {
   };
 }
 
+function normalizeRole(input) {
+  if (input === null || input === undefined) return null;
+  const raw = String(input).trim();
+  if (!raw) return null;
+
+  // Lowercase + diacritic normalization.
+  // React Native / Node both support `normalize('NFD')`.
+  // Note: AZ "ı" doesn't decompose, so we map it manually.
+  const lowered = raw.toLowerCase();
+  const simple = lowered
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .replace(/ə/g, "e")
+    .replace(/ş/g, "s")
+    .replace(/ç/g, "c")
+    .replace(/ğ/g, "g")
+    .replace(/ö/g, "o")
+    .replace(/ü/g, "u")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Allow both old/new values (AZ + EN) to avoid breaking existing users.
+  if (["seeker", "jobseeker", "job_seeker", "alici", "is axtaran", "is_axtaran", "is-axaran"].includes(simple)) {
+    return "seeker";
+  }
+  if (["employer", "hirer", "company", "satici", "isci axtaran", "isci_axtaran", "isci-axaran"].includes(simple)) {
+    return "employer";
+  }
+
+  // If it's already a supported role, keep it.
+  if (["seeker", "employer"].includes(lowered)) return lowered;
+
+  return null;
+}
+
+
+
+function inferRole(roleInput, companyName) {
+  // If company name exists, it's almost certainly an employer (işçi axtaran).
+  // This makes the system robust even if the client sends a wrong/missing role.
+  const hasCompany = companyName !== null && companyName !== undefined && String(companyName).trim().length > 0;
+  if (hasCompany) return "employer";
+
+  const r = normalizeRole(roleInput);
+  return r || "seeker";
+}
+
 function profileToUser(profile, authUser) {
   return {
     id: profile?.id || authUser?.id,
-    role: profile?.role,
+    role: normalizeRole(profile?.role) || null,
     fullName: profile?.full_name || "",
     companyName: profile?.company_name || null,
     email: authUser?.email || null,
@@ -122,11 +262,10 @@ app.post("/auth/register", async (req, res) => {
       location,
     } = req.body || {};
 
-    if (!email || !password || !fullName || !role) {
+    const finalRole = inferRole(role, companyName);
+
+    if (!email || !password || !fullName) {
       return res.status(400).json({ error: "Missing fields" });
-    }
-    if (!["seeker", "employer"].includes(role)) {
-      return res.status(400).json({ error: "Invalid role" });
     }
 
     // EMAIL OTP (6 rəqəmli kod) göndər.
@@ -138,9 +277,9 @@ app.post("/auth/register", async (req, res) => {
       options: {
         shouldCreateUser: true,
         data: {
-          role,
+          role: finalRole,
           fullName,
-          companyName: role === "employer" ? (companyName || null) : null,
+          companyName: finalRole === "employer" ? (companyName || null) : null,
           phone: phone || null,
           location: location || null,
         },
@@ -154,6 +293,35 @@ app.post("/auth/register", async (req, res) => {
         return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
       }
       return res.status(400).json({ error: msg });
+    }
+
+    // Best-effort: persist role/profile early (fixes cases where OTP metadata is not saved)
+    const otpUserId = data?.user?.id;
+    if (otpUserId) {
+      try {
+        const existing = data.user.user_metadata || {};
+        await supabaseAdmin.auth.admin.updateUserById(otpUserId, {
+          user_metadata: {
+            ...existing,
+            role: finalRole,
+            fullName,
+            companyName: finalRole === "employer" ? (companyName || null) : null,
+            phone: phone || null,
+            location: location || null,
+          },
+        });
+      } catch {}
+
+      try {
+        await supabaseAdmin.from("profiles").upsert({
+          id: otpUserId,
+          role: finalRole,
+          full_name: fullName,
+          company_name: finalRole === "employer" ? (companyName || null) : null,
+          phone: phone || null,
+          location: location || null,
+        });
+      } catch {}
     }
 
     // OTP axınında session adətən NULL olur.
@@ -224,7 +392,39 @@ app.post("/auth/login", async (req, res) => {
     const { data: signin, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
     if (error) return res.status(401).json({ error: "Email və ya şifrə yanlışdır" });
 
-    const profile = await getProfile(signin.user.id);
+    // Ensure we always have a canonical profile row (older users / edge cases).
+    let profile = await getProfile(signin.user.id);
+    const md = signin.user.user_metadata || {};
+    const profileRole = normalizeRole(profile?.role);
+    const mdRole = normalizeRole(md.role);
+    const mdCompany = md.companyName ?? md.company_name ?? null;
+    const profCompany = profile?.company_name ?? null;
+    const canonicalRole = inferRole(mdRole ?? profileRole, mdCompany ?? profCompany);
+    const canonicalFullName = String(profile?.full_name ?? md.fullName ?? md.full_name ?? "");
+    const canonicalCompany = canonicalRole === "employer"
+      ? (profCompany ?? mdCompany ?? null)
+      : null;
+    const canonicalPhone = profile?.phone ?? md.phone ?? null;
+    const canonicalLocation = profile?.location ?? md.location ?? null;
+
+    const needsUpsert =
+      !profile ||
+      normalizeRole(profile?.role) !== canonicalRole ||
+      profile?.role !== canonicalRole;
+
+    if (needsUpsert) {
+      try {
+        await supabaseAdmin.from("profiles").upsert({
+          id: signin.user.id,
+          role: canonicalRole,
+          full_name: canonicalFullName,
+          company_name: canonicalCompany,
+          phone: canonicalPhone,
+          location: canonicalLocation,
+        });
+      } catch {}
+      profile = await getProfile(signin.user.id);
+    }
 
     return res.json({
       token: signin.session.access_token,
@@ -240,7 +440,7 @@ app.post("/auth/login", async (req, res) => {
 // Verify Email OTP and return session tokens + create profile
 app.post("/auth/verify-otp", async (req, res) => {
   try {
-    const { email, code, password } = req.body || {};
+    const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, location: locationFromReq } = req.body || {};
     if (!email || !code) return res.status(400).json({ error: "Missing fields" });
     if (!password) return res.status(400).json({ error: "Password required" });
 
@@ -270,19 +470,34 @@ app.post("/auth/verify-otp", async (req, res) => {
     const userId = data.user.id;
 
     const md = data.user.user_metadata || {};
-    const role = md.role;
-    const fullName = md.fullName || "";
-    const companyName = md.companyName || null;
-    const phone = md.phone || null;
-    const location = md.location || null;
+    const finalRole = inferRole(roleFromReq ?? md.role, companyNameFromReq ?? md.companyName ?? md.company_name ?? null);
+
+    const finalFullName = String(fullNameFromReq ?? md.fullName ?? md.full_name ?? "");
+    const finalCompanyName = finalRole === "employer" ? (companyNameFromReq ?? md.companyName ?? md.company_name ?? null) : null;
+    const finalPhone = phoneFromReq ?? md.phone ?? null;
+    const finalLocation = locationFromReq ?? md.location ?? null;
+
+    // Keep auth user_metadata in sync (best-effort)
+    try {
+      await supabaseAdmin.auth.admin.updateUserById(userId, {
+        user_metadata: {
+          ...md,
+          role: finalRole,
+          fullName: finalFullName,
+          companyName: finalCompanyName,
+          phone: finalPhone,
+          location: finalLocation,
+        },
+      });
+    } catch {}
 
     const { error: profErr } = await supabaseAdmin.from("profiles").upsert({
       id: userId,
-      role,
-      full_name: fullName,
-      company_name: companyName,
-      phone,
-      location,
+      role: finalRole,
+      full_name: finalFullName,
+      company_name: finalCompanyName,
+      phone: finalPhone,
+      location: finalLocation,
     });
 
     if (profErr) return res.status(400).json({ error: profErr.message });
@@ -295,12 +510,20 @@ app.post("/auth/verify-otp", async (req, res) => {
       return res.status(500).json({ error: e.message || "Password set failed" });
     }
 
+    // IMPORTANT:
+    // Updating password can invalidate the OTP session tokens.
+    // So we create a *fresh* session via email+password and return that token.
+    const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email, password });
+    if (signinErr || !signin?.session || !signin?.user) {
+      return res.status(400).json({ error: signinErr?.message || "Login after OTP failed" });
+    }
+
     const profile = await getProfile(userId);
 
     return res.json({
-      token: data.session.access_token,
-      refreshToken: data.session.refresh_token,
-      user: profileToUser(profile, data.user),
+      token: signin.session.access_token,
+      refreshToken: signin.session.refresh_token,
+      user: profileToUser(profile, signin.user),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -341,7 +564,7 @@ app.post("/auth/refresh", async (req, res) => {
     const refreshToken = req.body?.refreshToken;
     if (!refreshToken) return res.status(400).json({ error: "refreshToken required" });
 
-    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    if (!SUPABASE_URL || !SUPABASE_AUTH_KEY) {
       return res.status(500).json({ error: "Supabase env not configured" });
     }
 
@@ -351,8 +574,8 @@ app.post("/auth/refresh", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        "apikey": SUPABASE_AUTH_KEY,
+        "Authorization": `Bearer ${SUPABASE_AUTH_KEY}`,
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
@@ -402,6 +625,34 @@ app.patch("/me/location", requireAuth, async (req, res) => {
 
     const profile = await getProfile(req.authUser.id);
     return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Save Expo Push Token (for notifications)
+app.post("/me/push-token", requireAuth, async (req, res) => {
+  try {
+    const expoPushToken = req.body?.expoPushToken;
+    if (!expoPushToken || typeof expoPushToken !== "string") {
+      return res.status(400).json({ error: "expoPushToken required" });
+    }
+
+    const { error } = await supabaseAdmin
+      .from("profiles")
+      .update({ expo_push_token: expoPushToken })
+      .eq("id", req.authUser.id);
+
+    if (error) {
+      const msg = error.message || "Update failed";
+      // If DB schema is missing the column, don't hard fail the whole app.
+      if (msg.toLowerCase().includes("expo_push_token") && msg.toLowerCase().includes("column")) {
+        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing. Add it to enable push notifications." });
+      }
+      return res.status(400).json({ error: msg });
+    }
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -498,7 +749,7 @@ app.get("/jobs", requireAuth, async (req, res) => {
 app.post("/jobs", requireAuth, async (req, res) => {
   try {
     const profile = await getProfile(req.authUser.id);
-    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can create jobs" });
+    if (normalizeRole(profile?.role) !== "employer") return res.status(403).json({ error: "Only employer can create jobs" });
 
     const {
       title,
@@ -550,6 +801,10 @@ app.post("/jobs", requireAuth, async (req, res) => {
       createdBy: data.created_by,
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
+
+    // Fire-and-forget: notify nearby seekers (push notifications), if enabled.
+    // This will not block the API response.
+    notifyNearbySeekers(job).catch((e) => console.warn("notifyNearbySeekers failed", e?.message || e));
 
     return res.json(job);
   } catch (e) {
