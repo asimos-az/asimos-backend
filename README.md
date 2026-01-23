@@ -18,12 +18,32 @@ Environment Variables (Render Dashboard):
 - SUPABASE_ANON_KEY
 - SUPABASE_SERVICE_ROLE_KEY
 
-> Service role key is **server-only**. Never put it in mobile.
+Admin Panel env:
+- ADMIN_EMAIL (default: admin@asimos.local)
+- ADMIN_PASSWORD (default: admin1234)
+- ADMIN_JWT_SECRET (required in prod)
+- ADMIN_TOKEN_TTL_SEC (optional)
 
+> `SUPABASE_SERVICE_ROLE_KEY` is **server-only**. Never put it in mobile.
+
+## Supabase migrations
+Run `supabase_migrations.sql` in Supabase SQL editor. It adds:
+- `profiles.expo_push_token` (optional)
+- `public.events` table (admin activity feed)
 
 ## Geo
 - `GET /geo/search?q=...` — Azerbaijan geocode proxy (Nominatim).
 
-
 ## Refresh token
 - `POST /auth/refresh` body: `{ refreshToken }` -> returns new `{ token, refreshToken, user }`.
+
+## Admin API
+- `POST /admin/login` -> `{ token }`
+- `GET /admin/dashboard`
+- `GET /admin/users`
+- `PATCH /admin/users/:id`
+- `DELETE /admin/users/:id`
+- `GET /admin/jobs`
+- `PATCH /admin/jobs/:id`
+- `DELETE /admin/jobs/:id`
+- `GET /admin/events`

@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -21,18 +22,14 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Some deploys forget to set SUPABASE_ANON_KEY on Render.
-// Server-side, the service role key can safely be used for Auth calls as a fallback.
-const SUPABASE_AUTH_KEY = SUPABASE_ANON_KEY || SUPABASE_SERVICE_ROLE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_AUTH_KEY) {
-  console.warn("Missing Supabase env vars. Please set SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and (SUPABASE_ANON_KEY or use service role as fallback)");
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("Missing Supabase env vars. Please set SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY");
 }
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
-const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_AUTH_KEY, {
+const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
@@ -40,7 +37,67 @@ const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_AUTH_KEY, {
 // NOTE: To fully enable push, add `expo_push_token` TEXT column to `profiles` table.
 // Example SQL:
 //   alter table public.profiles add column if not exists expo_push_token text;
-const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";// Static Super Admin (for React Admin Panel)
+// You can override these via env vars on Render.
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@asimos.local";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
+const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || "change_me_super_secret";
+const ADMIN_TOKEN_TTL_SEC = Number(process.env.ADMIN_TOKEN_TTL_SEC || 60 * 60 * 24 * 7); // 7 days
+
+function b64urlJson(obj) {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+
+function signAdminToken(payload) {
+  const header = { alg: "HS256", typ: "JWT" };
+  const now = Math.floor(Date.now() / 1000);
+  const fullPayload = { ...payload, iat: now, exp: now + ADMIN_TOKEN_TTL_SEC };
+  const part1 = b64urlJson(header);
+  const part2 = b64urlJson(fullPayload);
+  const data = `${part1}.${part2}`;
+  const sig = crypto.createHmac("sha256", ADMIN_JWT_SECRET).update(data).digest("base64url");
+  return `${data}.${sig}`;
+}
+
+function verifyAdminToken(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length !== 3) return null;
+    const [p1, p2, sig] = parts;
+    const data = `${p1}.${p2}`;
+    const expected = crypto.createHmac("sha256", ADMIN_JWT_SECRET).update(data).digest("base64url");
+    if (sig.length !== expected.length) return null;
+    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+    const payload = JSON.parse(Buffer.from(p2, "base64url").toString("utf8"));
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload?.exp || now >= payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function requireAdmin(req, res, next) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  const payload = verifyAdminToken(token);
+  if (!payload) return res.status(401).json({ error: "Unauthorized" });
+  req.admin = payload;
+  next();
+}
+
+async function logEvent(type, actorId, metadata) {
+  try {
+    // events table must exist (see supabase_migrations.sql)
+    await supabaseAdmin.from("events").insert({
+      type,
+      actor_id: actorId || null,
+      metadata: metadata || null,
+    });
+  } catch {
+    // ignore if table doesn't exist or insert fails
+  }
+}
 
 function chunk(arr, size) {
   const out = [];
@@ -87,7 +144,7 @@ async function notifyNearbySeekers(job) {
     const { data: profiles, error } = await supabaseAdmin
       .from("profiles")
       .select("id, full_name, location, expo_push_token")
-      .in("role", ["seeker", "alici", "is axtaran", "is_axtaran"])
+      .eq("role", "seeker")
       .limit(2000);
 
     if (error) {
@@ -154,58 +211,10 @@ function bbox(lat, lng, radiusM) {
   };
 }
 
-function normalizeRole(input) {
-  if (input === null || input === undefined) return null;
-  const raw = String(input).trim();
-  if (!raw) return null;
-
-  // Lowercase + diacritic normalization.
-  // React Native / Node both support `normalize('NFD')`.
-  // Note: AZ "ı" doesn't decompose, so we map it manually.
-  const lowered = raw.toLowerCase();
-  const simple = lowered
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/ı/g, "i")
-    .replace(/ə/g, "e")
-    .replace(/ş/g, "s")
-    .replace(/ç/g, "c")
-    .replace(/ğ/g, "g")
-    .replace(/ö/g, "o")
-    .replace(/ü/g, "u")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  // Allow both old/new values (AZ + EN) to avoid breaking existing users.
-  if (["seeker", "jobseeker", "job_seeker", "alici", "is axtaran", "is_axtaran", "is-axaran"].includes(simple)) {
-    return "seeker";
-  }
-  if (["employer", "hirer", "company", "satici", "isci axtaran", "isci_axtaran", "isci-axaran"].includes(simple)) {
-    return "employer";
-  }
-
-  // If it's already a supported role, keep it.
-  if (["seeker", "employer"].includes(lowered)) return lowered;
-
-  return null;
-}
-
-
-
-function inferRole(roleInput, companyName) {
-  // If company name exists, it's almost certainly an employer (işçi axtaran).
-  // This makes the system robust even if the client sends a wrong/missing role.
-  const hasCompany = companyName !== null && companyName !== undefined && String(companyName).trim().length > 0;
-  if (hasCompany) return "employer";
-
-  const r = normalizeRole(roleInput);
-  return r || "seeker";
-}
-
 function profileToUser(profile, authUser) {
   return {
     id: profile?.id || authUser?.id,
-    role: normalizeRole(profile?.role) || null,
+    role: profile?.role,
     fullName: profile?.full_name || "",
     companyName: profile?.company_name || null,
     email: authUser?.email || null,
@@ -244,10 +253,218 @@ async function requireAuth(req, res, next) {
 }
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+// -------------------- Admin API --------------------
+app.post("/admin/login", async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: "Missing fields" });
 
-// Register (uses admin API to create user, auto-confirm)
+    if (String(email).toLowerCase() !== String(ADMIN_EMAIL).toLowerCase() || String(password) !== String(ADMIN_PASSWORD)) {
+      await logEvent("admin_login_failed", null, { email });
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+    const token = signAdminToken({ sub: "admin", role: "super_admin", email: ADMIN_EMAIL });
+    await logEvent("admin_login_success", null, { email: ADMIN_EMAIL });
+    return res.json({ token, admin: { email: ADMIN_EMAIL, role: "super_admin" } });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/me", requireAdmin, (req, res) => {
+  return res.json({ admin: { email: req.admin.email, role: req.admin.role } });
+});
+
+app.get("/admin/dashboard", requireAdmin, async (req, res) => {
+  try {
+    const { count: usersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true });
+    const { count: seekersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "seeker");
+    const { count: employersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "employer");
+    const { count: jobsTotal } = await supabaseAdmin.from("jobs").select("*", { count: "exact", head: true });
+
+    const { data: events } = await supabaseAdmin
+      .from("events")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(25);
+
+    return res.json({
+      usersTotal: usersTotal || 0,
+      seekersTotal: seekersTotal || 0,
+      employersTotal: employersTotal || 0,
+      jobsTotal: jobsTotal || 0,
+      latestEvents: events || [],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Users (profiles)
+app.get("/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    const role = (req.query.role || "").toString().trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    let query = supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (role && ["seeker", "employer"].includes(role)) query = query.eq("role", role);
+    if (q) {
+      const safe = q.replaceAll(",", " ").trim();
+      query = query.or(`full_name.ilike.%${safe}%,company_name.ilike.%${safe}%,phone.ilike.%${safe}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const patch = req.body || {};
+
+    const allowed = {
+      role: patch.role,
+      full_name: patch.full_name,
+      company_name: patch.company_name,
+      phone: patch.phone,
+      location: patch.location,
+      expo_push_token: patch.expo_push_token,
+    };
+
+    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
+
+    if (allowed.role && !["seeker", "employer"].includes(allowed.role)) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+
+    const { data, error } = await supabaseAdmin.from("profiles").update(allowed).eq("id", id).select("*").single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_user_updated", null, { target_user_id: id, patch: allowed });
+    return res.json({ ok: true, user: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await supabaseAdmin.from("profiles").delete().eq("id", id);
+    try { await supabaseAdmin.auth.admin.deleteUser(id); } catch {}
+
+    await logEvent("admin_user_deleted", null, { target_user_id: id });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Jobs
+app.get("/admin/jobs", requireAdmin, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    let query = supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (q) {
+      const safe = q.replaceAll(",", " ").trim();
+      query = query.or(`title.ilike.%${safe}%,category.ilike.%${safe}%,description.ilike.%${safe}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const patch = req.body || {};
+
+    const allowed = {
+      title: patch.title,
+      category: patch.category,
+      description: patch.description,
+      wage: patch.wage,
+      whatsapp: patch.whatsapp,
+      is_daily: patch.is_daily,
+      notify_radius_m: patch.notify_radius_m,
+      location_lat: patch.location_lat,
+      location_lng: patch.location_lng,
+      location_address: patch.location_address,
+    };
+    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
+
+    const { data, error } = await supabaseAdmin.from("jobs").update(allowed).eq("id", id).select("*").single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_job_updated", null, { job_id: id, patch: allowed });
+    return res.json({ ok: true, job: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { error } = await supabaseAdmin.from("jobs").delete().eq("id", id);
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("admin_job_deleted", null, { job_id: id });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Events
+app.get("/admin/events", requireAdmin, async (req, res) => {
+  try {
+    const type = (req.query.type || "").toString().trim();
+    const actorId = (req.query.actorId || "").toString().trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    let query = supabaseAdmin
+      .from("events")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (type) query = query.eq("type", type);
+    if (actorId) query = query.eq("actor_id", actorId);
+
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+// -------------------- /Admin API --------------------
 
 // Register -> sends EMAIL OTP code via Supabase Auth (password is set after OTP verification)
 app.post("/auth/register", async (req, res) => {
@@ -262,10 +479,11 @@ app.post("/auth/register", async (req, res) => {
       location,
     } = req.body || {};
 
-    const finalRole = inferRole(role, companyName);
-
-    if (!email || !password || !fullName) {
+    if (!email || !password || !fullName || !role) {
       return res.status(400).json({ error: "Missing fields" });
+    }
+    if (!["seeker", "employer"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role" });
     }
 
     // EMAIL OTP (6 rəqəmli kod) göndər.
@@ -277,9 +495,9 @@ app.post("/auth/register", async (req, res) => {
       options: {
         shouldCreateUser: true,
         data: {
-          role: finalRole,
+          role,
           fullName,
-          companyName: finalRole === "employer" ? (companyName || null) : null,
+          companyName: role === "employer" ? (companyName || null) : null,
           phone: phone || null,
           location: location || null,
         },
@@ -303,9 +521,9 @@ app.post("/auth/register", async (req, res) => {
         await supabaseAdmin.auth.admin.updateUserById(otpUserId, {
           user_metadata: {
             ...existing,
-            role: finalRole,
+            role,
             fullName,
-            companyName: finalRole === "employer" ? (companyName || null) : null,
+            companyName: role === "employer" ? (companyName || null) : null,
             phone: phone || null,
             location: location || null,
           },
@@ -315,14 +533,16 @@ app.post("/auth/register", async (req, res) => {
       try {
         await supabaseAdmin.from("profiles").upsert({
           id: otpUserId,
-          role: finalRole,
+          role,
           full_name: fullName,
-          company_name: finalRole === "employer" ? (companyName || null) : null,
+          company_name: role === "employer" ? (companyName || null) : null,
           phone: phone || null,
           location: location || null,
         });
       } catch {}
     }
+
+    await logEvent("auth_register_request", otpUserId || null, { email, role, hasCompanyName: !!companyName });
 
     // OTP axınında session adətən NULL olur.
     return res.json({
@@ -392,39 +612,8 @@ app.post("/auth/login", async (req, res) => {
     const { data: signin, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
     if (error) return res.status(401).json({ error: "Email və ya şifrə yanlışdır" });
 
-    // Ensure we always have a canonical profile row (older users / edge cases).
-    let profile = await getProfile(signin.user.id);
-    const md = signin.user.user_metadata || {};
-    const profileRole = normalizeRole(profile?.role);
-    const mdRole = normalizeRole(md.role);
-    const mdCompany = md.companyName ?? md.company_name ?? null;
-    const profCompany = profile?.company_name ?? null;
-    const canonicalRole = inferRole(mdRole ?? profileRole, mdCompany ?? profCompany);
-    const canonicalFullName = String(profile?.full_name ?? md.fullName ?? md.full_name ?? "");
-    const canonicalCompany = canonicalRole === "employer"
-      ? (profCompany ?? mdCompany ?? null)
-      : null;
-    const canonicalPhone = profile?.phone ?? md.phone ?? null;
-    const canonicalLocation = profile?.location ?? md.location ?? null;
-
-    const needsUpsert =
-      !profile ||
-      normalizeRole(profile?.role) !== canonicalRole ||
-      profile?.role !== canonicalRole;
-
-    if (needsUpsert) {
-      try {
-        await supabaseAdmin.from("profiles").upsert({
-          id: signin.user.id,
-          role: canonicalRole,
-          full_name: canonicalFullName,
-          company_name: canonicalCompany,
-          phone: canonicalPhone,
-          location: canonicalLocation,
-        });
-      } catch {}
-      profile = await getProfile(signin.user.id);
-    }
+    const profile = await getProfile(signin.user.id);
+    await logEvent("auth_login", signin.user.id, { email });
 
     return res.json({
       token: signin.session.access_token,
@@ -470,10 +659,11 @@ app.post("/auth/verify-otp", async (req, res) => {
     const userId = data.user.id;
 
     const md = data.user.user_metadata || {};
-    const finalRole = inferRole(roleFromReq ?? md.role, companyNameFromReq ?? md.companyName ?? md.company_name ?? null);
+    const requestedRole = (roleFromReq ?? md.role);
+    const finalRole = ["seeker", "employer"].includes(requestedRole) ? requestedRole : "seeker";
 
-    const finalFullName = String(fullNameFromReq ?? md.fullName ?? md.full_name ?? "");
-    const finalCompanyName = finalRole === "employer" ? (companyNameFromReq ?? md.companyName ?? md.company_name ?? null) : null;
+    const finalFullName = String(fullNameFromReq ?? md.fullName ?? "");
+    const finalCompanyName = finalRole === "employer" ? (companyNameFromReq ?? md.companyName ?? null) : null;
     const finalPhone = phoneFromReq ?? md.phone ?? null;
     const finalLocation = locationFromReq ?? md.location ?? null;
 
@@ -519,6 +709,7 @@ app.post("/auth/verify-otp", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
+    await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
 
     return res.json({
       token: signin.session.access_token,
@@ -564,7 +755,7 @@ app.post("/auth/refresh", async (req, res) => {
     const refreshToken = req.body?.refreshToken;
     if (!refreshToken) return res.status(400).json({ error: "refreshToken required" });
 
-    if (!SUPABASE_URL || !SUPABASE_AUTH_KEY) {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
       return res.status(500).json({ error: "Supabase env not configured" });
     }
 
@@ -574,8 +765,8 @@ app.post("/auth/refresh", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "apikey": SUPABASE_AUTH_KEY,
-        "Authorization": `Bearer ${SUPABASE_AUTH_KEY}`,
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
@@ -596,6 +787,7 @@ app.post("/auth/refresh", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
+    await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
 
     return res.json({
       token: accessToken,
@@ -624,6 +816,7 @@ app.patch("/me/location", requireAuth, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
 
     const profile = await getProfile(req.authUser.id);
+    await logEvent("location_update", req.authUser.id, { location: loc });
     return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -651,7 +844,7 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       }
       return res.status(400).json({ error: msg });
     }
-
+    await logEvent("push_token_saved", req.authUser.id, { hasToken: true });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -749,7 +942,7 @@ app.get("/jobs", requireAuth, async (req, res) => {
 app.post("/jobs", requireAuth, async (req, res) => {
   try {
     const profile = await getProfile(req.authUser.id);
-    if (normalizeRole(profile?.role) !== "employer") return res.status(403).json({ error: "Only employer can create jobs" });
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can create jobs" });
 
     const {
       title,
@@ -801,6 +994,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       createdBy: data.created_by,
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
+
+    await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title });
 
     // Fire-and-forget: notify nearby seekers (push notifications), if enabled.
     // This will not block the API response.
