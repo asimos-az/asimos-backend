@@ -259,7 +259,12 @@ app.post("/admin/login", async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "Missing fields" });
 
-    if (String(email).toLowerCase() !== String(ADMIN_EMAIL).toLowerCase() || String(password) !== String(ADMIN_PASSWORD)) {
+    const emailIn = String(email).trim().toLowerCase();
+    const passIn = String(password).trim();
+    const emailEnv = String(ADMIN_EMAIL || "").trim().toLowerCase();
+    const passEnv = String(ADMIN_PASSWORD || "").trim();
+
+    if (emailIn !== emailEnv || passIn !== passEnv) {
       await logEvent("admin_login_failed", null, { email });
       return res.status(401).json({ error: "Invalid credentials" });
     }
