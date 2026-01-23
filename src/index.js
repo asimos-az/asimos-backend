@@ -288,18 +288,25 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const { count: employersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "employer");
     const { count: jobsTotal } = await supabaseAdmin.from("jobs").select("*", { count: "exact", head: true });
 
-    const { data: events } = await supabaseAdmin
+    // Events are optional until you run supabase_migrations.sql.
+    // If the table doesn't exist yet, we still return dashboard counts.
+    const evRes = await supabaseAdmin
       .from("events")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(25);
+
+    const evErrMsg = (evRes?.error?.message || "").toString();
+    const eventsSetupRequired = /Could not find the table|schema cache/i.test(evErrMsg);
+    const latestEvents = eventsSetupRequired ? [] : (evRes?.data || []);
 
     return res.json({
       usersTotal: usersTotal || 0,
       seekersTotal: seekersTotal || 0,
       employersTotal: employersTotal || 0,
       jobsTotal: jobsTotal || 0,
-      latestEvents: events || [],
+      latestEvents,
+      eventsSetupRequired,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -471,7 +478,21 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
     if (actorId) query = query.eq("actor_id", actorId);
 
     const { data, error } = await query;
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      const msg = (error.message || "").toString();
+      // If events table isn't created yet, don't hard-fail.
+      if (/Could not find the table|schema cache/i.test(msg)) {
+        return res.json({
+          items: [],
+          limit,
+          offset,
+          eventsSetupRequired: true,
+          hint:
+            "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.events cədvəli yaradılmalıdır). Sonra 10-30 saniyə gözləyin və yenidən yoxlayın.",
+        });
+      }
+      return res.status(400).json({ error: msg });
+    }
     return res.json({ items: data || [], limit, offset });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
