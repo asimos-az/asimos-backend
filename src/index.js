@@ -314,19 +314,27 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
 
-    let query = supabaseAdmin
-      .from("profiles")
-      .select("*")
-      .order("updated_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+    // NOTE: Some projects don't have profiles.updated_at (or even created_at).
+    // Don't hard-depend on those columns; try a safe ordering and gracefully fall back.
+    const buildBaseQuery = () => {
+      let query = supabaseAdmin
+        .from("profiles")
+        .select("*")
+        .range(offset, offset + limit - 1);
 
-    if (role && ["seeker", "employer"].includes(role)) query = query.eq("role", role);
-    if (q) {
-      const safe = q.replaceAll(",", " ").trim();
-      query = query.or(`full_name.ilike.%${safe}%,company_name.ilike.%${safe}%,phone.ilike.%${safe}%`);
+      if (role && ["seeker", "employer"].includes(role)) query = query.eq("role", role);
+      if (q) {
+        const safe = q.replaceAll(",", " ").trim();
+        query = query.or(`full_name.ilike.%${safe}%,company_name.ilike.%${safe}%,phone.ilike.%${safe}%`);
+      }
+      return query;
+    };
+
+    // Try ordering by created_at first (common), otherwise no order.
+    let { data, error } = await buildBaseQuery().order("created_at", { ascending: false });
+    if (error && /does not exist/i.test(error.message || "")) {
+      ({ data, error } = await buildBaseQuery());
     }
-
-    const { data, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ items: data || [], limit, offset });
   } catch (e) {
