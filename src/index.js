@@ -99,6 +99,35 @@ async function logEvent(type, actorId, metadata) {
   }
 }
 
+function normalizeText(v) {
+  return String(v || "").trim();
+}
+
+function slugifyAz(value) {
+  const s = normalizeText(value)
+    .toLowerCase()
+    // AZ specific
+    .replaceAll("ə", "e")
+    .replaceAll("ı", "i")
+    .replaceAll("ö", "o")
+    .replaceAll("ü", "u")
+    .replaceAll("ç", "c")
+    .replaceAll("ş", "s")
+    .replaceAll("ğ", "g")
+    // generic
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+  return s || "category";
+}
+
+function dayKey(iso) {
+  if (!iso) return null;
+  return String(iso).slice(0, 10);
+}
+
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < (arr?.length || 0); i += size) out.push(arr.slice(i, i + size));
@@ -252,7 +281,61 @@ async function requireAuth(req, res, next) {
   }
 }
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+// Healthcheck + lightweight version info (useful to confirm Render deployed the latest code)
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "asimos-backend",
+    // Bump this when you redeploy, so you can quickly confirm the running version.
+    version: "2026-01-23-admin-v2",
+    features: {
+      admin: true,
+      categories: true,
+      dashboardAnalytics: true,
+      map: true,
+      events: true,
+    },
+  });
+});
+
+// Admin meta (requires admin token). If this route is 404 in production, it means Render is running an older build.
+app.get("/admin/meta", requireAdmin, (req, res) => {
+  res.json({
+    ok: true,
+    version: "2026-01-23-admin-v2",
+    admin: { email: req.admin?.email, role: req.admin?.role },
+    features: {
+      categories: true,
+      dashboardAnalytics: true,
+      map: true,
+      events: true,
+    },
+  });
+});
+
+// Public: categories for mobile select
+app.get("/categories", async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .select("id, name, slug, sort, is_active")
+      .eq("is_active", true)
+      .order("sort", { ascending: true })
+      .order("name", { ascending: true })
+      .limit(500);
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache/i.test(msg)) {
+        return res.json({ items: [], categoriesSetupRequired: true });
+      }
+      return res.status(400).json({ error: msg });
+    }
+    return res.json({ items: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
 // -------------------- Admin API --------------------
 app.post("/admin/login", async (req, res) => {
   try {
@@ -288,11 +371,38 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const { count: employersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "employer");
     const { count: jobsTotal } = await supabaseAdmin.from("jobs").select("*", { count: "exact", head: true });
 
+    // -------- Analytics (for charts) --------
+    const since14 = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const since7 = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Jobs analytics
+    const jobsRes = await supabaseAdmin
+      .from("jobs")
+      .select("category, created_at")
+      .gte("created_at", since14)
+      .limit(5000);
+
+    const jobsRows = jobsRes?.data || [];
+    const jobsByDayMap = new Map();
+    const jobsByCatMap = new Map();
+    for (const j of jobsRows) {
+      const dk = dayKey(j.created_at);
+      if (dk) jobsByDayMap.set(dk, (jobsByDayMap.get(dk) || 0) + 1);
+      const cat = normalizeText(j.category) || "Digər";
+      jobsByCatMap.set(cat, (jobsByCatMap.get(cat) || 0) + 1);
+    }
+    const jobsByDay = Array.from(jobsByDayMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, count]) => ({ date, count }));
+    const jobsByCategory = Array.from(jobsByCatMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([name, count]) => ({ name, count }));
+
     // Events are optional until you run supabase_migrations.sql.
-    // If the table doesn't exist yet, we still return dashboard counts.
     const evRes = await supabaseAdmin
       .from("events")
-      .select("*")
+      .select("type, actor_id, metadata, created_at, id")
       .order("created_at", { ascending: false })
       .limit(25);
 
@@ -300,13 +410,51 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const eventsSetupRequired = /Could not find the table|schema cache/i.test(evErrMsg);
     const latestEvents = eventsSetupRequired ? [] : (evRes?.data || []);
 
+    let eventsByType = [];
+    let eventsByDay = [];
+    if (!eventsSetupRequired) {
+      const evAgg = await supabaseAdmin
+        .from("events")
+        .select("type, created_at")
+        .gte("created_at", since14)
+        .limit(5000);
+
+      const evRows = evAgg?.data || [];
+      const byType = new Map();
+      const byDay = new Map();
+      for (const ev of evRows) {
+        const dk = dayKey(ev.created_at);
+        if (dk) byDay.set(dk, (byDay.get(dk) || 0) + 1);
+        const t = normalizeText(ev.type) || "unknown";
+        byType.set(t, (byType.get(t) || 0) + 1);
+      }
+      eventsByType = Array.from(byType.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([type, count]) => ({ type, count }));
+      eventsByDay = Array.from(byDay.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, count]) => ({ date, count }));
+    }
+
     return res.json({
       usersTotal: usersTotal || 0,
       seekersTotal: seekersTotal || 0,
       employersTotal: employersTotal || 0,
       jobsTotal: jobsTotal || 0,
+      usersByRole: {
+        seeker: seekersTotal || 0,
+        employer: employersTotal || 0,
+      },
+      jobsByCategory,
+      jobsByDay,
+      eventsByType,
+      eventsByDay,
       latestEvents,
       eventsSetupRequired,
+      hint: eventsSetupRequired
+        ? "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.events cədvəli yaradılmalıdır)."
+        : undefined,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -454,6 +602,113 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
     const { error } = await supabaseAdmin.from("jobs").delete().eq("id", id);
     if (error) return res.status(400).json({ error: error.message });
     await logEvent("admin_job_deleted", null, { job_id: id });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Kateqoriyalar (Admin)
+app.get("/admin/categories", requireAdmin, async (req, res) => {
+  try {
+    const q = normalizeText(req.query.q);
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 200)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    let query = supabaseAdmin
+      .from("categories")
+      .select("*")
+      .order("sort", { ascending: true })
+      .order("name", { ascending: true })
+      .range(offset, offset + limit - 1);
+
+    if (q) {
+      const safe = q.replaceAll(",", " ").trim();
+      query = query.or(`name.ilike.%${safe}%,slug.ilike.%${safe}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache/i.test(msg)) {
+        return res.json({
+          items: [],
+          limit,
+          offset,
+          categoriesSetupRequired: true,
+          hint:
+            "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.categories cədvəli yaradılmalıdır).",
+        });
+      }
+      return res.status(400).json({ error: msg });
+    }
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/admin/categories", requireAdmin, async (req, res) => {
+  try {
+    const name = normalizeText(req.body?.name);
+    const sort = Number(req.body?.sort ?? 0);
+    const is_active = req.body?.is_active === undefined ? true : !!req.body?.is_active;
+    if (!name) return res.status(400).json({ error: "Kateqoriya adı boş ola bilməz" });
+
+    const slug = normalizeText(req.body?.slug) || slugifyAz(name);
+
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .insert({ name, slug, sort: Number.isFinite(sort) ? sort : 0, is_active })
+      .select("*")
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("admin_category_created", null, { category_id: data?.id, name, slug });
+    return res.json({ ok: true, category: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/admin/categories/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const patch = req.body || {};
+
+    const allowed = {
+      name: patch.name !== undefined ? normalizeText(patch.name) : undefined,
+      slug: patch.slug !== undefined ? normalizeText(patch.slug) : undefined,
+      sort: patch.sort !== undefined ? Number(patch.sort) : undefined,
+      is_active: patch.is_active !== undefined ? !!patch.is_active : undefined,
+    };
+    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
+
+    if (allowed.name && !allowed.slug) {
+      allowed.slug = slugifyAz(allowed.name);
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .update(allowed)
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("admin_category_updated", null, { category_id: id, patch: allowed });
+    return res.json({ ok: true, category: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { error } = await supabaseAdmin.from("categories").delete().eq("id", id);
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("admin_category_deleted", null, { category_id: id });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -981,6 +1236,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
     const {
       title,
       category,
+      categoryId,
       description,
       wage,
       whatsapp,
@@ -995,12 +1251,23 @@ app.post("/jobs", requireAuth, async (req, res) => {
     const locLng = toNum(location?.lng);
     const locAddr = location?.address ? String(location.address) : null;
 
+    // If mobile sends categoryId (preferred), resolve to category name.
+    let categoryName = category ? normalizeText(category) : "";
+    if (!categoryName && categoryId) {
+      const { data: c, error: cErr } = await supabaseAdmin
+        .from("categories")
+        .select("name")
+        .eq("id", categoryId)
+        .maybeSingle();
+      if (!cErr && c?.name) categoryName = normalizeText(c.name);
+    }
+
     const { data, error } = await supabaseAdmin
       .from("jobs")
       .insert({
         created_by: req.authUser.id,
         title,
-        category: category || null,
+        category: categoryName || null,
         description: description || "",
         wage: wage || null,
         whatsapp: whatsapp || null,
