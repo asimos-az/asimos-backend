@@ -22,32 +22,32 @@ create index if not exists events_created_at_idx on public.events (created_at de
 create index if not exists events_type_idx on public.events (type);
 create index if not exists events_actor_id_idx on public.events (actor_id);
 
+-- Jobs auto-expiry (Daimi / Müvəqqəti)
+-- Daimi: 28 gün sonra avtomatik silinir
+-- Müvəqqəti: seçilən gün sayı bitəndə avtomatik silinir
+alter table public.jobs
+  add column if not exists job_type text;
 
--- Kateqoriyalar (Admin Paneldən idarə olunur, mobil tərəfdə select kimi istifadə olunur)
-create table if not exists public.categories (
-  id uuid primary key default gen_random_uuid(),
-  created_at timestamptz not null default now(),
-  name text not null,
-  slug text not null,
-  sort int not null default 0,
-  is_active boolean not null default true
-);
+alter table public.jobs
+  add column if not exists duration_days integer;
 
--- Unique constraints (safe if already exists)
-do $$
-begin
-  if not exists (
-    select 1 from pg_constraint where conname = 'categories_name_key'
-  ) then
-    alter table public.categories add constraint categories_name_key unique (name);
-  end if;
+alter table public.jobs
+  add column if not exists expires_at timestamptz;
 
-  if not exists (
-    select 1 from pg_constraint where conname = 'categories_slug_key'
-  ) then
-    alter table public.categories add constraint categories_slug_key unique (slug);
-  end if;
-end $$;
+create index if not exists jobs_expires_at_idx on public.jobs (expires_at);
 
-create index if not exists categories_sort_idx on public.categories (sort, created_at);
-create index if not exists categories_active_idx on public.categories (is_active);
+-- Backfill existing rows
+update public.jobs
+set job_type = case when coalesce(is_daily, false) then 'temporary' else 'permanent' end
+where job_type is null;
+
+update public.jobs
+set duration_days = 1
+where job_type = 'temporary' and duration_days is null;
+
+update public.jobs
+set expires_at = case
+  when job_type = 'temporary' then created_at + (coalesce(duration_days, 1) * interval '1 day')
+  else created_at + interval '28 days'
+end
+where expires_at is null;

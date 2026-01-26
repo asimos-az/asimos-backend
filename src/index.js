@@ -99,35 +99,6 @@ async function logEvent(type, actorId, metadata) {
   }
 }
 
-function normalizeText(v) {
-  return String(v || "").trim();
-}
-
-function slugifyAz(value) {
-  const s = normalizeText(value)
-    .toLowerCase()
-    // AZ specific
-    .replaceAll("ə", "e")
-    .replaceAll("ı", "i")
-    .replaceAll("ö", "o")
-    .replaceAll("ü", "u")
-    .replaceAll("ç", "c")
-    .replaceAll("ş", "s")
-    .replaceAll("ğ", "g")
-    // generic
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/-{2,}/g, "-");
-  return s || "category";
-}
-
-function dayKey(iso) {
-  if (!iso) return null;
-  return String(iso).slice(0, 10);
-}
-
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < (arr?.length || 0); i += size) out.push(arr.slice(i, i + size));
@@ -240,6 +211,40 @@ function bbox(lat, lng, radiusM) {
   };
 }
 
+const MS_DAY = 24 * 60 * 60 * 1000;
+
+function normalizeJobType(jobType, isDaily) {
+  const raw = String(jobType || "").trim().toLowerCase();
+  if (raw === "temporary" || raw === "temp" || raw.includes("müvəqqəti") || raw.includes("muveqqeti")) return "temporary";
+  if (raw === "permanent" || raw === "perm" || raw.includes("daimi")) return "permanent";
+  return isDaily ? "temporary" : "permanent";
+}
+
+function computeExpiresAt(jobType, durationDays) {
+  const now = Date.now();
+  if (jobType === "temporary") {
+    const days = Number(durationDays);
+    return new Date(now + days * MS_DAY).toISOString();
+  }
+  return new Date(now + 28 * MS_DAY).toISOString();
+}
+
+async function cleanupExpiredJobs() {
+  try {
+    const nowIso = new Date().toISOString();
+    // Delete jobs with explicit expiry
+    await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso);
+
+    // Backward-compat: if expires_at is missing, treat permanent jobs as 28-day TTL
+    const cutoffIso = new Date(Date.now() - 28 * MS_DAY).toISOString();
+    await supabaseAdmin.from("jobs").delete().is("expires_at", null).eq("is_daily", false).lte("created_at", cutoffIso);
+    await supabaseAdmin.from("jobs").delete().is("expires_at", null).is("is_daily", null).lte("created_at", cutoffIso);
+  } catch {
+    // ignore (e.g., column doesn't exist yet)
+  }
+}
+
+
 function profileToUser(profile, authUser) {
   return {
     id: profile?.id || authUser?.id,
@@ -281,61 +286,7 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// Healthcheck + lightweight version info (useful to confirm Render deployed the latest code)
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "asimos-backend",
-    // Bump this when you redeploy, so you can quickly confirm the running version.
-    version: "2026-01-23-admin-v2",
-    features: {
-      admin: true,
-      categories: true,
-      dashboardAnalytics: true,
-      map: true,
-      events: true,
-    },
-  });
-});
-
-// Admin meta (requires admin token). If this route is 404 in production, it means Render is running an older build.
-app.get("/admin/meta", requireAdmin, (req, res) => {
-  res.json({
-    ok: true,
-    version: "2026-01-23-admin-v2",
-    admin: { email: req.admin?.email, role: req.admin?.role },
-    features: {
-      categories: true,
-      dashboardAnalytics: true,
-      map: true,
-      events: true,
-    },
-  });
-});
-
-// Public: categories for mobile select
-app.get("/categories", async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("categories")
-      .select("id, name, slug, sort, is_active")
-      .eq("is_active", true)
-      .order("sort", { ascending: true })
-      .order("name", { ascending: true })
-      .limit(500);
-
-    if (error) {
-      const msg = String(error.message || "");
-      if (/Could not find the table|schema cache/i.test(msg)) {
-        return res.json({ items: [], categoriesSetupRequired: true });
-      }
-      return res.status(400).json({ error: msg });
-    }
-    return res.json({ items: data || [] });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
+app.get("/health", (req, res) => res.json({ ok: true }));
 // -------------------- Admin API --------------------
 app.post("/admin/login", async (req, res) => {
   try {
@@ -371,38 +322,11 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const { count: employersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "employer");
     const { count: jobsTotal } = await supabaseAdmin.from("jobs").select("*", { count: "exact", head: true });
 
-    // -------- Analytics (for charts) --------
-    const since14 = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const since7 = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-    // Jobs analytics
-    const jobsRes = await supabaseAdmin
-      .from("jobs")
-      .select("category, created_at")
-      .gte("created_at", since14)
-      .limit(5000);
-
-    const jobsRows = jobsRes?.data || [];
-    const jobsByDayMap = new Map();
-    const jobsByCatMap = new Map();
-    for (const j of jobsRows) {
-      const dk = dayKey(j.created_at);
-      if (dk) jobsByDayMap.set(dk, (jobsByDayMap.get(dk) || 0) + 1);
-      const cat = normalizeText(j.category) || "Digər";
-      jobsByCatMap.set(cat, (jobsByCatMap.get(cat) || 0) + 1);
-    }
-    const jobsByDay = Array.from(jobsByDayMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, count]) => ({ date, count }));
-    const jobsByCategory = Array.from(jobsByCatMap.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([name, count]) => ({ name, count }));
-
     // Events are optional until you run supabase_migrations.sql.
+    // If the table doesn't exist yet, we still return dashboard counts.
     const evRes = await supabaseAdmin
       .from("events")
-      .select("type, actor_id, metadata, created_at, id")
+      .select("*")
       .order("created_at", { ascending: false })
       .limit(25);
 
@@ -410,51 +334,13 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const eventsSetupRequired = /Could not find the table|schema cache/i.test(evErrMsg);
     const latestEvents = eventsSetupRequired ? [] : (evRes?.data || []);
 
-    let eventsByType = [];
-    let eventsByDay = [];
-    if (!eventsSetupRequired) {
-      const evAgg = await supabaseAdmin
-        .from("events")
-        .select("type, created_at")
-        .gte("created_at", since14)
-        .limit(5000);
-
-      const evRows = evAgg?.data || [];
-      const byType = new Map();
-      const byDay = new Map();
-      for (const ev of evRows) {
-        const dk = dayKey(ev.created_at);
-        if (dk) byDay.set(dk, (byDay.get(dk) || 0) + 1);
-        const t = normalizeText(ev.type) || "unknown";
-        byType.set(t, (byType.get(t) || 0) + 1);
-      }
-      eventsByType = Array.from(byType.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10)
-        .map(([type, count]) => ({ type, count }));
-      eventsByDay = Array.from(byDay.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([date, count]) => ({ date, count }));
-    }
-
     return res.json({
       usersTotal: usersTotal || 0,
       seekersTotal: seekersTotal || 0,
       employersTotal: employersTotal || 0,
       jobsTotal: jobsTotal || 0,
-      usersByRole: {
-        seeker: seekersTotal || 0,
-        employer: employersTotal || 0,
-      },
-      jobsByCategory,
-      jobsByDay,
-      eventsByType,
-      eventsByDay,
       latestEvents,
       eventsSetupRequired,
-      hint: eventsSetupRequired
-        ? "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.events cədvəli yaradılmalıdır)."
-        : undefined,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -602,113 +488,6 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
     const { error } = await supabaseAdmin.from("jobs").delete().eq("id", id);
     if (error) return res.status(400).json({ error: error.message });
     await logEvent("admin_job_deleted", null, { job_id: id });
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-// Kateqoriyalar (Admin)
-app.get("/admin/categories", requireAdmin, async (req, res) => {
-  try {
-    const q = normalizeText(req.query.q);
-    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 200)));
-    const offset = Math.max(0, Number(req.query.offset || 0));
-
-    let query = supabaseAdmin
-      .from("categories")
-      .select("*")
-      .order("sort", { ascending: true })
-      .order("name", { ascending: true })
-      .range(offset, offset + limit - 1);
-
-    if (q) {
-      const safe = q.replaceAll(",", " ").trim();
-      query = query.or(`name.ilike.%${safe}%,slug.ilike.%${safe}%`);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      const msg = String(error.message || "");
-      if (/Could not find the table|schema cache/i.test(msg)) {
-        return res.json({
-          items: [],
-          limit,
-          offset,
-          categoriesSetupRequired: true,
-          hint:
-            "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.categories cədvəli yaradılmalıdır).",
-        });
-      }
-      return res.status(400).json({ error: msg });
-    }
-    return res.json({ items: data || [], limit, offset });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.post("/admin/categories", requireAdmin, async (req, res) => {
-  try {
-    const name = normalizeText(req.body?.name);
-    const sort = Number(req.body?.sort ?? 0);
-    const is_active = req.body?.is_active === undefined ? true : !!req.body?.is_active;
-    if (!name) return res.status(400).json({ error: "Kateqoriya adı boş ola bilməz" });
-
-    const slug = normalizeText(req.body?.slug) || slugifyAz(name);
-
-    const { data, error } = await supabaseAdmin
-      .from("categories")
-      .insert({ name, slug, sort: Number.isFinite(sort) ? sort : 0, is_active })
-      .select("*")
-      .single();
-
-    if (error) return res.status(400).json({ error: error.message });
-    await logEvent("admin_category_created", null, { category_id: data?.id, name, slug });
-    return res.json({ ok: true, category: data });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.patch("/admin/categories/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const patch = req.body || {};
-
-    const allowed = {
-      name: patch.name !== undefined ? normalizeText(patch.name) : undefined,
-      slug: patch.slug !== undefined ? normalizeText(patch.slug) : undefined,
-      sort: patch.sort !== undefined ? Number(patch.sort) : undefined,
-      is_active: patch.is_active !== undefined ? !!patch.is_active : undefined,
-    };
-    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
-
-    if (allowed.name && !allowed.slug) {
-      allowed.slug = slugifyAz(allowed.name);
-    }
-
-    const { data, error } = await supabaseAdmin
-      .from("categories")
-      .update(allowed)
-      .eq("id", id)
-      .select("*")
-      .single();
-
-    if (error) return res.status(400).json({ error: error.message });
-    await logEvent("admin_category_updated", null, { category_id: id, patch: allowed });
-    return res.json({ ok: true, category: data });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const { error } = await supabaseAdmin.from("categories").delete().eq("id", id);
-    if (error) return res.status(400).json({ error: error.message });
-    await logEvent("admin_category_deleted", null, { category_id: id });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -1140,6 +919,29 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
   }
 });
 
+// Clear Expo Push Token (disable notifications for this user)
+app.delete("/me/push-token", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from("profiles")
+      .update({ expo_push_token: null })
+      .eq("id", req.authUser.id);
+
+    if (error) {
+      const msg = error.message || "Update failed";
+      if (msg.toLowerCase().includes("expo_push_token") && msg.toLowerCase().includes("column")) {
+        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing. Add it to enable push notifications." });
+      }
+      return res.status(400).json({ error: msg });
+    }
+
+    await logEvent("push_token_cleared", req.authUser.id, { hasToken: false });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 // List jobs (search + optional createdBy filter)
 app.get("/jobs", requireAuth, async (req, res) => {
   try {
@@ -1153,6 +955,9 @@ app.get("/jobs", requireAuth, async (req, res) => {
     const baseLat = toNum(req.query.lat) ?? toNum(profile?.location?.lat);
     const baseLng = toNum(req.query.lng) ?? toNum(profile?.location?.lng);
     const radiusM = toNum(req.query.radius_m) ?? null;
+
+    // Auto-delete expired jobs (best-effort)
+    await cleanupExpiredJobs();
 
     let query = supabaseAdmin
       .from("jobs")
@@ -1186,7 +991,14 @@ app.get("/jobs", requireAuth, async (req, res) => {
     const { data, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
 
+    const nowMs = Date.now();
+
     let items = (data || []).map((r) => {
+      const expiresMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
+      const createdMs = r.created_at ? new Date(r.created_at).getTime() : null;
+      if (expiresMs !== null && expiresMs <= nowMs) return null;
+      if (expiresMs === null && (r.is_daily === false || r.is_daily === null) && createdMs !== null && createdMs <= (nowMs - 28 * MS_DAY)) return null;
+
       const loc = {
         lat: r.location_lat,
         lng: r.location_lng,
@@ -1200,6 +1012,9 @@ app.get("/jobs", requireAuth, async (req, res) => {
         wage: r.wage,
         whatsapp: r.whatsapp,
         isDaily: r.is_daily,
+        jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
+        durationDays: (r.duration_days ?? null),
+        expiresAt: (r.expires_at ?? null),
         notifyRadiusM: r.notify_radius_m,
         createdAt: r.created_at,
         createdBy: r.created_by,
@@ -1210,7 +1025,7 @@ app.get("/jobs", requireAuth, async (req, res) => {
         job.distanceM = Math.round(haversineDistanceM(baseLat, baseLng, loc.lat, loc.lng));
       }
       return job;
-    });
+    }).filter(Boolean);
 
     if (radiusM !== null) {
       items = items.filter((j) => typeof j.distanceM !== "number" || j.distanceM <= radiusM);
@@ -1236,51 +1051,82 @@ app.post("/jobs", requireAuth, async (req, res) => {
     const {
       title,
       category,
-      categoryId,
       description,
       wage,
       whatsapp,
       isDaily,
+      jobType,
+      durationDays,
       notifyRadiusM,
       location,
     } = req.body || {};
 
     if (!title) return res.status(400).json({ error: "Title required" });
 
+    const jt = normalizeJobType(jobType, !!isDaily);
+    let dDays = null;
+    if (jt === "temporary") {
+      dDays = toNum(durationDays);
+      if (!dDays || dDays < 1 || dDays > 365) {
+        return res.status(400).json({ error: "durationDays required (1-365) for temporary job" });
+      }
+    }
+
+    const expiresAt = computeExpiresAt(jt, dDays || 1);
+
     const locLat = toNum(location?.lat);
     const locLng = toNum(location?.lng);
     const locAddr = location?.address ? String(location.address) : null;
 
-    // If mobile sends categoryId (preferred), resolve to category name.
-    let categoryName = category ? normalizeText(category) : "";
-    if (!categoryName && categoryId) {
-      const { data: c, error: cErr } = await supabaseAdmin
-        .from("categories")
-        .select("name")
-        .eq("id", categoryId)
-        .maybeSingle();
-      if (!cErr && c?.name) categoryName = normalizeText(c.name);
-    }
+    const payload = {
+      created_by: req.authUser.id,
+      title,
+      category: category || null,
+      description: description || "",
+      wage: wage || null,
+      whatsapp: whatsapp || null,
+      // Keep old boolean field for mobile compatibility
+      is_daily: jt === "temporary",
+      // New fields (may not exist yet — fallback below)
+      job_type: jt,
+      duration_days: dDays,
+      expires_at: expiresAt,
+      notify_radius_m: toNum(notifyRadiusM),
+      location_lat: locLat,
+      location_lng: locLng,
+      location_address: locAddr,
+    };
 
-    const { data, error } = await supabaseAdmin
+    let data = null;
+    let error = null;
+
+    ({ data, error } = await supabaseAdmin
       .from("jobs")
-      .insert({
-        created_by: req.authUser.id,
-        title,
-        category: categoryName || null,
-        description: description || "",
-        wage: wage || null,
-        whatsapp: whatsapp || null,
-        is_daily: !!isDaily,
-        notify_radius_m: toNum(notifyRadiusM),
-        location_lat: locLat,
-        location_lng: locLng,
-        location_address: locAddr,
-      })
+      .insert(payload)
       .select("*")
-      .single();
+      .single());
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      // If the DB schema is not migrated yet, retry without new columns (so the app keeps working).
+      const msg = String(error.message || "");
+      if (/column .*\b(job_type|duration_days|expires_at)\b/i.test(msg)) {
+        const fallback = { ...payload };
+        fallback.job_type = undefined;
+        fallback.duration_days = undefined;
+        fallback.expires_at = undefined;
+
+        const r2 = await supabaseAdmin
+          .from("jobs")
+          .insert(fallback)
+          .select("*")
+          .single();
+
+        if (r2.error) return res.status(400).json({ error: r2.error.message });
+        data = r2.data;
+      } else {
+        return res.status(400).json({ error: msg });
+      }
+    }
 
     const job = {
       id: data.id,
@@ -1290,13 +1136,16 @@ app.post("/jobs", requireAuth, async (req, res) => {
       wage: data.wage,
       whatsapp: data.whatsapp,
       isDaily: data.is_daily,
+      jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
+      durationDays: (data.duration_days ?? null),
+      expiresAt: (data.expires_at ?? null),
       notifyRadiusM: data.notify_radius_m,
       createdAt: data.created_at,
       createdBy: data.created_by,
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
 
-    await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title });
+    await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title, job_type: job.jobType, duration_days: job.durationDays });
 
     // Fire-and-forget: notify nearby seekers (push notifications), if enabled.
     // This will not block the API response.
