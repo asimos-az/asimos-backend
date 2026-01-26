@@ -132,6 +132,32 @@ async function sendExpoPush(messages) {
   return { ok: true, sent };
 }
 
+async function insertNotifications(rows) {
+  if (!rows?.length) return { ok: true, inserted: 0 };
+  try {
+    // Chunk to avoid payload limits
+    const batches = chunk(rows, 500);
+    let inserted = 0;
+    for (const b of batches) {
+      const { error } = await supabaseAdmin.from("notifications").insert(b);
+      if (error) {
+        const msg = String(error.message || "");
+        // If table doesn't exist yet, don't break notification flow.
+        if (/Could not find the table|schema cache|does not exist/i.test(msg)) {
+          return { ok: false, warning: "notifications table missing" };
+        }
+        console.warn("insertNotifications failed", msg);
+        continue;
+      }
+      inserted += b.length;
+    }
+    return { ok: true, inserted };
+  } catch (e) {
+    console.warn("insertNotifications exception", e?.message || e);
+    return { ok: false };
+  }
+}
+
 async function notifyNearbySeekers(job) {
   try {
     const lat = toNum(job?.location?.lat);
@@ -141,19 +167,28 @@ async function notifyNearbySeekers(job) {
     const radiusM = toNum(job?.notifyRadiusM) ?? 500;
     if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
 
-    const { data: profiles, error } = await supabaseAdmin
-      .from("profiles")
-      .select("id, full_name, location, expo_push_token")
-      .eq("role", "seeker")
-      .limit(2000);
+    // Fetch seekers in pages (covers large user counts)
+    const all = [];
+    const PAGE = 1000;
+    for (let offset = 0; offset < 20000; offset += PAGE) {
+      const { data, error } = await supabaseAdmin
+        .from("profiles")
+        .select("id, full_name, location, expo_push_token")
+        .eq("role", "seeker")
+        .range(offset, offset + PAGE - 1);
 
-    if (error) {
-      console.warn("notifyNearbySeekers: profile fetch failed", error.message);
-      return { ok: false, reason: "profile_fetch_failed" };
+      if (error) {
+        console.warn("notifyNearbySeekers: profile fetch failed", error.message);
+        return { ok: false, reason: "profile_fetch_failed" };
+      }
+      if (!data || data.length === 0) break;
+      all.push(...data);
+      if (data.length < PAGE) break;
     }
 
     const messages = [];
-    for (const p of profiles || []) {
+    const notifRows = [];
+    for (const p of all) {
       const token = p?.expo_push_token;
       if (!token || typeof token !== "string") continue;
       const pl = p?.location || null;
@@ -163,18 +198,32 @@ async function notifyNearbySeekers(job) {
 
       const d = haversineDistanceM(lat, lng, plat, plng);
       if (d <= radiusM) {
+        const title = "Yaxınlıqda iş var";
+        const body = job?.title ? `\"${job.title}\" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
+
+        // Save to in-app inbox (best-effort)
+        notifRows.push({
+          user_id: p.id,
+          title,
+          body,
+          data: { type: "job", jobId: job?.id || null },
+        });
+
         messages.push({
           to: token,
           sound: "default",
-          title: "Yaxınlıqda iş var",
-          body: job?.title ? `\"${job.title}\" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.",
-          data: { type: "job", job },
+          title,
+          body,
+          data: { type: "job", jobId: job?.id || null },
         });
       }
     }
 
+    // Save notifications first (best-effort)
+    await insertNotifications(notifRows);
+
     const res = await sendExpoPush(messages);
-    return { ok: true, candidates: profiles?.length || 0, notified: messages.length, sent: res.sent };
+    return { ok: true, candidates: all.length || 0, notified: messages.length, sent: res.sent };
   } catch (e) {
     console.warn("notifyNearbySeekers error", e);
     return { ok: false, reason: "exception" };
@@ -198,19 +247,6 @@ function haversineDistanceM(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
-
-function slugify(input) {
-  return String(input || "")
-    .trim()
-    .toLowerCase()
-    .replace(/['"]/g, "")
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-
 
 function bbox(lat, lng, radiusM) {
   // Approx bounding box
@@ -506,170 +542,6 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
-
-
-// Categories (with sub-categories via parent_id)
-app.get("/admin/categories", requireAdmin, async (req, res) => {
-  try {
-    const q = (req.query.q || "").toString().trim();
-    const limit = Math.min(1000, Math.max(1, Number(req.query.limit || 200)));
-
-    let query = supabaseAdmin
-      .from("categories")
-      .select("*")
-      .order("sort", { ascending: true })
-      .order("created_at", { ascending: false })
-      .limit(limit);
-
-    if (q) {
-      const safe = q.replaceAll(",", " ").trim();
-      query = query.or(`name.ilike.%${safe}%,slug.ilike.%${safe}%`);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      const msg = (error.message || "").toString();
-      if (/Could not find the table|schema cache/i.test(msg)) {
-        return res.json({
-          items: [],
-          categoriesSetupRequired: true,
-          hint:
-            "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.categories cədvəli yaradılmalıdır). Sonra 10-30 saniyə gözləyin və yenidən yoxlayın.",
-        });
-      }
-      return res.status(400).json({ error: msg });
-    }
-    return res.json({ items: data || [] });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.post("/admin/categories", requireAdmin, async (req, res) => {
-  try {
-    const { name, slug, sort, is_active, parent_id } = req.body || {};
-    if (!name || !String(name).trim()) return res.status(400).json({ error: "Name is required" });
-
-    const finalSlug = String(slug || "").trim() ? String(slug).trim() : slugify(name);
-    if (!finalSlug) return res.status(400).json({ error: "Slug is required" });
-
-    // Optional: validate parent exists
-    if (parent_id) {
-      const { data: parent, error: pErr } = await supabaseAdmin.from("categories").select("id").eq("id", parent_id).maybeSingle();
-      if (pErr) return res.status(400).json({ error: pErr.message });
-      if (!parent) return res.status(400).json({ error: "Parent category not found" });
-    }
-
-    const payload = {
-      name: String(name).trim(),
-      slug: finalSlug,
-      sort: Number.isFinite(Number(sort)) ? Number(sort) : 0,
-      is_active: is_active !== false,
-      parent_id: parent_id || null,
-    };
-
-    const { data, error } = await supabaseAdmin.from("categories").insert(payload).select("*").single();
-    if (error) return res.status(400).json({ error: error.message });
-
-    await logEvent("admin_category_created", null, { category_id: data.id, payload });
-    return res.json({ ok: true, category: data });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.patch("/admin/categories/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = req.params.id;
-    const patch = req.body || {};
-
-    const allowed = {
-      name: patch.name !== undefined ? String(patch.name || "").trim() : undefined,
-      slug: patch.slug !== undefined ? String(patch.slug || "").trim() : undefined,
-      sort: patch.sort !== undefined ? (Number.isFinite(Number(patch.sort)) ? Number(patch.sort) : 0) : undefined,
-      is_active: patch.is_active !== undefined ? patch.is_active !== false : undefined,
-      parent_id: patch.parent_id !== undefined ? (patch.parent_id || null) : undefined,
-    };
-    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
-
-    if (allowed.name === "") return res.status(400).json({ error: "Name is required" });
-    if (allowed.slug === "") allowed.slug = allowed.name ? slugify(allowed.name) : undefined;
-
-    if (allowed.parent_id) {
-      if (allowed.parent_id === id) return res.status(400).json({ error: "Parent cannot be itself" });
-      const { data: parent, error: pErr } = await supabaseAdmin.from("categories").select("id").eq("id", allowed.parent_id).maybeSingle();
-      if (pErr) return res.status(400).json({ error: pErr.message });
-      if (!parent) return res.status(400).json({ error: "Parent category not found" });
-    }
-
-    const { data, error } = await supabaseAdmin.from("categories").update(allowed).eq("id", id).select("*").single();
-    if (error) return res.status(400).json({ error: error.message });
-
-    await logEvent("admin_category_updated", null, { category_id: id, patch: allowed });
-    return res.json({ ok: true, category: data });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = req.params.id;
-
-    // Prevent deleting a parent that still has children (so admin doesn't accidentally break structure)
-    const { count: childrenCount, error: cErr } = await supabaseAdmin
-      .from("categories")
-      .select("*", { count: "exact", head: true })
-      .eq("parent_id", id);
-
-    if (cErr) return res.status(400).json({ error: cErr.message });
-    if ((childrenCount || 0) > 0) {
-      return res.status(400).json({ error: "Bu kateqoriyanın alt-kateqoriyaları var. Əvvəlcə onları silin və ya parent-i dəyişin." });
-    }
-
-    const { error } = await supabaseAdmin.from("categories").delete().eq("id", id);
-    if (error) return res.status(400).json({ error: error.message });
-
-    await logEvent("admin_category_deleted", null, { category_id: id });
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
-// Public categories (for mobile selects)
-app.get("/categories", async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("categories")
-      .select("*")
-      .eq("is_active", true)
-      .order("sort", { ascending: true })
-      .order("created_at", { ascending: false })
-      .limit(2000);
-
-    if (error) {
-      const msg = (error.message || "").toString();
-      if (/Could not find the table|schema cache/i.test(msg)) {
-        return res.json({ items: [], categoriesSetupRequired: true });
-      }
-      return res.status(400).json({ error: msg });
-    }
-
-    // Nest them: parents -> children
-    const byId = new Map();
-    const parents = [];
-    for (const c of data || []) byId.set(c.id, { ...c, children: [] });
-    for (const c of byId.values()) {
-      if (c.parent_id && byId.has(c.parent_id)) byId.get(c.parent_id).children.push(c);
-      else parents.push(c);
-    }
-    return res.json({ items: parents });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
-
 
 // Events
 app.get("/admin/events", requireAdmin, async (req, res) => {
@@ -1096,23 +968,106 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
   }
 });
 
-// Clear Expo Push Token (disable notifications for this user)
+// Remove Expo Push Token (disable notifications)
 app.delete("/me/push-token", requireAuth, async (req, res) => {
   try {
     const { error } = await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: null })
       .eq("id", req.authUser.id);
-
     if (error) {
-      const msg = error.message || "Update failed";
+      const msg = String(error.message || "Update failed");
       if (msg.toLowerCase().includes("expo_push_token") && msg.toLowerCase().includes("column")) {
-        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing. Add it to enable push notifications." });
+        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing." });
       }
       return res.status(400).json({ error: msg });
     }
+    await logEvent("push_token_removed", req.authUser.id, { hasToken: false });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
 
-    await logEvent("push_token_cleared", req.authUser.id, { hasToken: false });
+// -------------------- Notifications (in-app inbox) --------------------
+app.get("/me/notifications", requireAuth, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    const { data, error } = await supabaseAdmin
+      .from("notifications")
+      .select("*")
+      .eq("user_id", req.authUser.id)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ items: [], limit, offset });
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/me/notifications/unread-count", requireAuth, async (req, res) => {
+  try {
+    const { count, error } = await supabaseAdmin
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", req.authUser.id)
+      .is("read_at", null);
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ unread: 0 });
+      return res.status(400).json({ error: error.message });
+    }
+    return res.json({ unread: count || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/me/notifications/:id/read", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const { error } = await supabaseAdmin
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("user_id", req.authUser.id);
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ ok: true });
+      return res.status(400).json({ error: error.message });
+    }
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("user_id", req.authUser.id)
+      .is("read_at", null);
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ ok: true });
+      return res.status(400).json({ error: error.message });
+    }
+
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -1214,6 +1169,55 @@ app.get("/jobs", requireAuth, async (req, res) => {
     }
 
     return res.json(items);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Get a single job by id
+app.get("/jobs/:id", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    // Auto-delete expired jobs (best-effort)
+    await cleanupExpiredJobs();
+
+    const { data, error } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (error) return res.status(400).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: "Not found" });
+
+    const profile = await getProfile(req.authUser.id);
+    const baseLat = toNum(profile?.location?.lat);
+    const baseLng = toNum(profile?.location?.lng);
+
+    const job = {
+      id: data.id,
+      title: data.title,
+      category: data.category,
+      description: data.description,
+      wage: data.wage,
+      whatsapp: data.whatsapp,
+      isDaily: data.is_daily,
+      jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
+      durationDays: (data.duration_days ?? null),
+      expiresAt: (data.expires_at ?? null),
+      notifyRadiusM: data.notify_radius_m,
+      createdAt: data.created_at,
+      createdBy: data.created_by,
+      location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
+    };
+
+    if (baseLat !== null && baseLng !== null && typeof job.location.lat === "number" && typeof job.location.lng === "number") {
+      job.distanceM = Math.round(haversineDistanceM(baseLat, baseLng, job.location.lat, job.location.lng));
+    }
+
+    return res.json(job);
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }

@@ -5,6 +5,22 @@ create extension if not exists pgcrypto;
 alter table public.profiles
   add column if not exists expo_push_token text;
 
+-- Notifications inbox
+-- Stores in-app notification history for users (seekers/employers)
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  user_id uuid not null,
+  title text not null,
+  body text not null,
+  data jsonb null,
+  read_at timestamptz null
+);
+
+create index if not exists notifications_user_id_idx on public.notifications (user_id);
+create index if not exists notifications_created_at_idx on public.notifications (created_at desc);
+create index if not exists notifications_user_unread_idx on public.notifications (user_id) where read_at is null;
+
 -- (Optional) You may want an index, if you later query by token
 -- create index if not exists profiles_expo_push_token_idx on public.profiles (expo_push_token);
 
@@ -51,20 +67,3 @@ set expires_at = case
   else created_at + interval '28 days'
 end
 where expires_at is null;
-
-
--- Categories (with optional sub-categories via parent_id)
-create table if not exists public.categories (
-  id uuid primary key default gen_random_uuid(),
-  created_at timestamptz not null default now(),
-  name text not null,
-  slug text not null,
-  sort integer not null default 0,
-  is_active boolean not null default true,
-  parent_id uuid null references public.categories(id) on delete set null
-);
-
-create unique index if not exists categories_slug_uniq on public.categories (slug);
-create index if not exists categories_parent_id_idx on public.categories (parent_id);
-create index if not exists categories_sort_idx on public.categories (sort);
-
