@@ -4,6 +4,15 @@ create extension if not exists pgcrypto;
 alter table public.profiles
   add column if not exists expo_push_token text;
 
+-- Recommended: keep tokens in a separate table (more reliable across schema changes)
+create table if not exists public.push_tokens (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  expo_push_token text not null,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists push_tokens_updated_at_idx on public.push_tokens (updated_at desc);
+
 -- Notifications inbox (in-app history)
 create table if not exists public.notifications (
   id uuid primary key default gen_random_uuid(),

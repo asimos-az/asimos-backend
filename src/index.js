@@ -182,14 +182,31 @@ async function notifyNearbySeekers(job) {
         return { ok: false, reason: "profile_fetch_failed" };
       }
       if (!data || data.length === 0) break;
-      all.push(...data);
+
+      // Pull tokens from the dedicated push_tokens table (preferred)
+      const ids = data.map((x) => x.id).filter(Boolean);
+      let tokenMap = new Map();
+      if (ids.length) {
+        const { data: tData } = await supabaseAdmin
+          .from("push_tokens")
+          .select("user_id, expo_push_token")
+          .in("user_id", ids);
+        for (const t of tData || []) tokenMap.set(t.user_id, t.expo_push_token);
+      }
+
+      all.push(
+        ...data.map((p) => ({
+          ...p,
+          __push_token: tokenMap.get(p.id) || p.expo_push_token || null,
+        }))
+      );
       if (data.length < PAGE) break;
     }
 
     const messages = [];
     const notifRows = [];
     for (const p of all) {
-      const token = p?.expo_push_token;
+      const token = p?.__push_token || p?.expo_push_token;
       if (!token || typeof token !== "string") continue;
       const pl = p?.location || null;
       const plat = toNum(pl?.lat);
@@ -1123,19 +1140,24 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "expoPushToken required" });
     }
 
-    const { error } = await supabaseAdmin
+    // 1) Upsert into push_tokens (preferred)
+    const { error: tokErr } = await supabaseAdmin
+      .from("push_tokens")
+      .upsert(
+        { user_id: req.authUser.id, expo_push_token: expoPushToken, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" }
+      );
+    if (tokErr) {
+      return res.status(400).json({ error: tokErr.message || "Update failed" });
+    }
+
+    // 2) Best-effort legacy storage on profiles (optional)
+    await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: expoPushToken })
-      .eq("id", req.authUser.id);
-
-    if (error) {
-      const msg = error.message || "Update failed";
-      // If DB schema is missing the column, don't hard fail the whole app.
-      if (msg.toLowerCase().includes("expo_push_token") && msg.toLowerCase().includes("column")) {
-        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing. Add it to enable push notifications." });
-      }
-      return res.status(400).json({ error: msg });
-    }
+      .eq("id", req.authUser.id)
+      .then(() => {})
+      .catch(() => {});
     await logEvent("push_token_saved", req.authUser.id, { hasToken: true });
     return res.json({ ok: true });
   } catch (e) {
@@ -1146,17 +1168,22 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
 // Remove Expo Push Token (disable notifications)
 app.delete("/me/push-token", requireAuth, async (req, res) => {
   try {
-    const { error } = await supabaseAdmin
+    // 1) Remove from push_tokens
+    await supabaseAdmin
+      .from("push_tokens")
+      .delete()
+      .eq("user_id", req.authUser.id)
+      .then(() => {})
+      .catch(() => {});
+
+    // 2) Best-effort legacy storage clear
+    await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: null })
-      .eq("id", req.authUser.id);
-    if (error) {
-      const msg = String(error.message || "Update failed");
-      if (msg.toLowerCase().includes("expo_push_token") && msg.toLowerCase().includes("column")) {
-        return res.json({ ok: false, warning: "profiles.expo_push_token column is missing." });
-      }
-      return res.status(400).json({ error: msg });
-    }
+      .eq("id", req.authUser.id)
+      .then(() => {})
+      .catch(() => {});
+
     await logEvent("push_token_removed", req.authUser.id, { hasToken: false });
     return res.json({ ok: true });
   } catch (e) {
