@@ -260,6 +260,18 @@ function bbox(lat, lng, radiusM) {
   };
 }
 
+function slugify(input) {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+
 const MS_DAY = 24 * 60 * 60 * 1000;
 
 function normalizeJobType(jobType, isDaily) {
@@ -538,6 +550,169 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
     await logEvent("admin_job_deleted", null, { job_id: id });
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+
+// Categories (with sub-categories via parent_id)
+app.get("/admin/categories", requireAdmin, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    const limit = Math.min(1000, Math.max(1, Number(req.query.limit || 200)));
+
+    let query = supabaseAdmin
+      .from("categories")
+      .select("*")
+      .order("sort", { ascending: true })
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (q) {
+      const safe = q.replaceAll(",", " ").trim();
+      query = query.or(`name.ilike.%${safe}%,slug.ilike.%${safe}%`);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      const msg = (error.message || "").toString();
+      if (/Could not find the table|schema cache/i.test(msg)) {
+        return res.json({
+          items: [],
+          categoriesSetupRequired: true,
+          hint:
+            "Supabase SQL Editor-də backend/supabase_migrations.sql faylını run edin (public.categories cədvəli yaradılmalıdır). Sonra 10-30 saniyə gözləyin və yenidən yoxlayın.",
+        });
+      }
+      return res.status(400).json({ error: msg });
+    }
+    return res.json({ items: data || [] });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/admin/categories", requireAdmin, async (req, res) => {
+  try {
+    const { name, slug, sort, is_active, parent_id } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: "Name is required" });
+
+    const finalSlug = String(slug || "").trim() ? String(slug).trim() : slugify(name);
+    if (!finalSlug) return res.status(400).json({ error: "Slug is required" });
+
+    // Optional: validate parent exists
+    if (parent_id) {
+      const { data: parent, error: pErr } = await supabaseAdmin.from("categories").select("id").eq("id", parent_id).maybeSingle();
+      if (pErr) return res.status(400).json({ error: pErr.message });
+      if (!parent) return res.status(400).json({ error: "Parent category not found" });
+    }
+
+    const payload = {
+      name: String(name).trim(),
+      slug: finalSlug,
+      sort: Number.isFinite(Number(sort)) ? Number(sort) : 0,
+      is_active: is_active !== false,
+      parent_id: parent_id || null,
+    };
+
+    const { data, error } = await supabaseAdmin.from("categories").insert(payload).select("*").single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_category_created", null, { category_id: data.id, payload });
+    return res.json({ ok: true, category: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/admin/categories/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const patch = req.body || {};
+
+    const allowed = {
+      name: patch.name !== undefined ? String(patch.name || "").trim() : undefined,
+      slug: patch.slug !== undefined ? String(patch.slug || "").trim() : undefined,
+      sort: patch.sort !== undefined ? (Number.isFinite(Number(patch.sort)) ? Number(patch.sort) : 0) : undefined,
+      is_active: patch.is_active !== undefined ? patch.is_active !== false : undefined,
+      parent_id: patch.parent_id !== undefined ? (patch.parent_id || null) : undefined,
+    };
+    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
+
+    if (allowed.name === "") return res.status(400).json({ error: "Name is required" });
+    if (allowed.slug === "") allowed.slug = allowed.name ? slugify(allowed.name) : undefined;
+
+    if (allowed.parent_id) {
+      if (allowed.parent_id === id) return res.status(400).json({ error: "Parent cannot be itself" });
+      const { data: parent, error: pErr } = await supabaseAdmin.from("categories").select("id").eq("id", allowed.parent_id).maybeSingle();
+      if (pErr) return res.status(400).json({ error: pErr.message });
+      if (!parent) return res.status(400).json({ error: "Parent category not found" });
+    }
+
+    const { data, error } = await supabaseAdmin.from("categories").update(allowed).eq("id", id).select("*").single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_category_updated", null, { category_id: id, patch: allowed });
+    return res.json({ ok: true, category: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    // Prevent deleting a parent that still has children (so admin doesn't accidentally break structure)
+    const { count: childrenCount, error: cErr } = await supabaseAdmin
+      .from("categories")
+      .select("*", { count: "exact", head: true })
+      .eq("parent_id", id);
+
+    if (cErr) return res.status(400).json({ error: cErr.message });
+    if ((childrenCount || 0) > 0) {
+      return res.status(400).json({ error: "Bu kateqoriyanın alt-kateqoriyaları var. Əvvəlcə onları silin və ya parent-i dəyişin." });
+    }
+
+    const { error } = await supabaseAdmin.from("categories").delete().eq("id", id);
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_category_deleted", null, { category_id: id });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Public categories (for mobile selects)
+app.get("/categories", async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("categories")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort", { ascending: true })
+      .order("created_at", { ascending: false })
+      .limit(2000);
+
+    if (error) {
+      const msg = (error.message || "").toString();
+      if (/Could not find the table|schema cache/i.test(msg)) {
+        return res.json({ items: [], categoriesSetupRequired: true });
+      }
+      return res.status(400).json({ error: msg });
+    }
+
+    // Nest them: parents -> children
+    const byId = new Map();
+    const parents = [];
+    for (const c of data || []) byId.set(c.id, { ...c, children: [] });
+    for (const c of byId.values()) {
+      if (c.parent_id && byId.has(c.parent_id)) byId.get(c.parent_id).children.push(c);
+      else parents.push(c);
+    }
+    return res.json({ items: parents });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }

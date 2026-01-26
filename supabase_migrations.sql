@@ -1,12 +1,10 @@
 create extension if not exists pgcrypto;
 
 -- Optional: enable Expo push notifications
--- Add a column to store Expo push token
 alter table public.profiles
   add column if not exists expo_push_token text;
 
--- Notifications inbox
--- Stores in-app notification history for users (seekers/employers)
+-- Notifications inbox (in-app history)
 create table if not exists public.notifications (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),
@@ -20,10 +18,6 @@ create table if not exists public.notifications (
 create index if not exists notifications_user_id_idx on public.notifications (user_id);
 create index if not exists notifications_created_at_idx on public.notifications (created_at desc);
 create index if not exists notifications_user_unread_idx on public.notifications (user_id) where read_at is null;
-
--- (Optional) You may want an index, if you later query by token
--- create index if not exists profiles_expo_push_token_idx on public.profiles (expo_push_token);
-
 
 -- Admin Panel activity feed (events)
 create table if not exists public.events (
@@ -39,8 +33,6 @@ create index if not exists events_type_idx on public.events (type);
 create index if not exists events_actor_id_idx on public.events (actor_id);
 
 -- Jobs auto-expiry (Daimi / Müvəqqəti)
--- Daimi: 28 gün sonra avtomatik silinir
--- Müvəqqəti: seçilən gün sayı bitəndə avtomatik silinir
 alter table public.jobs
   add column if not exists job_type text;
 
@@ -52,7 +44,7 @@ alter table public.jobs
 
 create index if not exists jobs_expires_at_idx on public.jobs (expires_at);
 
--- Backfill existing rows
+-- Backfill existing rows (safe)
 update public.jobs
 set job_type = case when coalesce(is_daily, false) then 'temporary' else 'permanent' end
 where job_type is null;
@@ -67,3 +59,18 @@ set expires_at = case
   else created_at + interval '28 days'
 end
 where expires_at is null;
+
+-- Categories (with optional sub-categories via parent_id)
+create table if not exists public.categories (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  name text not null,
+  slug text not null,
+  sort integer not null default 0,
+  is_active boolean not null default true,
+  parent_id uuid null references public.categories(id) on delete set null
+);
+
+create unique index if not exists categories_slug_uniq on public.categories (slug);
+create index if not exists categories_parent_id_idx on public.categories (parent_id);
+create index if not exists categories_sort_idx on public.categories (sort);
