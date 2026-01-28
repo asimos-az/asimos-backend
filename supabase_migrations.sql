@@ -99,3 +99,13 @@ create table if not exists public.categories (
 create unique index if not exists categories_slug_uniq on public.categories (slug);
 create index if not exists categories_parent_id_idx on public.categories (parent_id);
 create index if not exists categories_sort_idx on public.categories (sort);
+
+-- Job contact fields (VOEN + phone + link)
+alter table public.jobs
+  add column if not exists voen text;
+
+alter table public.jobs
+  add column if not exists contact_phone text;
+
+alter table public.jobs
+  add column if not exists contact_link text;
