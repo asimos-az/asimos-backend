@@ -51,9 +51,25 @@ alter table public.jobs
 alter table public.jobs
   add column if not exists expires_at timestamptz;
 
+-- Jobs lifecycle (open/closed)
+alter table public.jobs
+  add column if not exists status text not null default 'open';
+
+alter table public.jobs
+  add column if not exists closed_at timestamptz;
+
+alter table public.jobs
+  add column if not exists closed_reason text;
+
+create index if not exists jobs_status_idx on public.jobs (status);
+
 create index if not exists jobs_expires_at_idx on public.jobs (expires_at);
 
 -- Backfill existing rows (safe)
+update public.jobs
+set status = 'open'
+where status is null;
+
 update public.jobs
 set job_type = case when coalesce(is_daily, false) then 'temporary' else 'permanent' end
 where job_type is null;

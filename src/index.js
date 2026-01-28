@@ -531,6 +531,78 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
   }
 });
 
+// Admin can create jobs from panel (same fields as mobile employer create)
+// Required: created_by (employer user id), title
+app.post("/admin/jobs", requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const title = String(body.title || "").trim();
+    const created_by = body.created_by ? String(body.created_by).trim() : "";
+
+    if (!title) return res.status(400).json({ error: "Title is required" });
+    if (!created_by) return res.status(400).json({ error: "created_by (employer user id) is required" });
+
+    // Validate employer exists
+    const { data: emp, error: empErr } = await supabaseAdmin
+      .from("profiles")
+      .select("id, role")
+      .eq("id", created_by)
+      .single();
+    if (empErr || !emp) return res.status(400).json({ error: "Employer user not found" });
+    if (String(emp.role || "").toLowerCase() !== "employer") {
+      return res.status(400).json({ error: "created_by must be an employer" });
+    }
+
+    const is_daily = !!body.is_daily;
+    const notify_radius_m = body.notify_radius_m !== undefined && body.notify_radius_m !== null && body.notify_radius_m !== ""
+      ? Number(body.notify_radius_m)
+      : null;
+    const location_lat = body.location_lat !== undefined && body.location_lat !== null && body.location_lat !== ""
+      ? Number(body.location_lat)
+      : null;
+    const location_lng = body.location_lng !== undefined && body.location_lng !== null && body.location_lng !== ""
+      ? Number(body.location_lng)
+      : null;
+
+    const insertRow = {
+      created_by,
+      title,
+      category: body.category ? String(body.category).trim() : null,
+      description: body.description ? String(body.description) : "",
+      wage: body.wage ? String(body.wage).trim() : null,
+      whatsapp: body.whatsapp ? String(body.whatsapp).trim() : null,
+      is_daily,
+      notify_radius_m: Number.isFinite(notify_radius_m) ? notify_radius_m : null,
+      location_lat: Number.isFinite(location_lat) ? location_lat : null,
+      location_lng: Number.isFinite(location_lng) ? location_lng : null,
+      location_address: body.location_address ? String(body.location_address) : null,
+      status: body.status ? String(body.status) : "open",
+    };
+
+    const { data, error } = await supabaseAdmin.from("jobs").insert(insertRow).select("*").single();
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Trigger seeker notifications (best-effort)
+    try {
+      const jobForNotify = {
+        id: data.id,
+        title: data.title,
+        notifyRadiusM: data.notify_radius_m ?? (Number.isFinite(notify_radius_m) ? notify_radius_m : 500),
+        location: {
+          lat: data.location_lat,
+          lng: data.location_lng,
+        },
+      };
+      await notifyNearbySeekers(jobForNotify);
+    } catch {}
+
+    await logEvent("admin_job_created", null, { job_id: data.id, created_by });
+    return res.json({ ok: true, job: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
@@ -1352,6 +1424,9 @@ app.get("/jobs", requireAuth, async (req, res) => {
         notifyRadiusM: r.notify_radius_m,
         createdAt: r.created_at,
         createdBy: r.created_by,
+        status: (r.status || "open"),
+        closedAt: (r.closed_at ?? null),
+        closedReason: (r.closed_reason ?? null),
         location: loc,
       };
 
@@ -1368,6 +1443,11 @@ app.get("/jobs", requireAuth, async (req, res) => {
     // Sort closest first if distance exists
     if (baseLat !== null && baseLng !== null) {
       items.sort((a, b) => (a.distanceM ?? 1e18) - (b.distanceM ?? 1e18));
+    }
+
+    // Hide closed jobs from seekers by default
+    if (profile?.role === "seeker") {
+      items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
     }
 
     return res.json(items);
@@ -1412,8 +1492,16 @@ app.get("/jobs/:id", requireAuth, async (req, res) => {
       notifyRadiusM: data.notify_radius_m,
       createdAt: data.created_at,
       createdBy: data.created_by,
+      status: (data.status || "open"),
+      closedAt: (data.closed_at ?? null),
+      closedReason: (data.closed_reason ?? null),
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
+
+    // If seeker tries to open a closed job, hide it (acts like not found)
+    if (profile?.role === "seeker" && String(job.status || "open").toLowerCase() === "closed") {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     if (baseLat !== null && baseLng !== null && typeof job.location.lat === "number" && typeof job.location.lng === "number") {
       job.distanceM = Math.round(haversineDistanceM(baseLat, baseLng, job.location.lat, job.location.lng));
@@ -1463,6 +1551,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     const payload = {
       created_by: req.authUser.id,
+      status: "open",
       title,
       category: category || null,
       description: description || "",
@@ -1492,11 +1581,13 @@ app.post("/jobs", requireAuth, async (req, res) => {
     if (error) {
       // If the DB schema is not migrated yet, retry without new columns (so the app keeps working).
       const msg = String(error.message || "");
-      if (/column .*\b(job_type|duration_days|expires_at)\b/i.test(msg)) {
+      if (/column .*\b(job_type|duration_days|expires_at|status)\b/i.test(msg)) {
         const fallback = { ...payload };
         fallback.job_type = undefined;
         fallback.duration_days = undefined;
         fallback.expires_at = undefined;
+        fallback.status = undefined;
+        fallback.status = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -1525,6 +1616,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
       notifyRadiusM: data.notify_radius_m,
       createdAt: data.created_at,
       createdBy: data.created_by,
+      status: (data.status || "open"),
+      closedAt: (data.closed_at ?? null),
+      closedReason: (data.closed_reason ?? null),
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
 
@@ -1535,6 +1629,313 @@ app.post("/jobs", requireAuth, async (req, res) => {
     notifyNearbySeekers(job).catch((e) => console.warn("notifyNearbySeekers failed", e?.message || e));
 
     return res.json(job);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Close a job (employer owner only)
+app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can close jobs" });
+
+    const { data: row, error: gErr } = await supabaseAdmin
+      .from("jobs")
+      .select("id, created_by, is_daily, job_type, duration_days")
+      .eq("id", id)
+      .maybeSingle();
+    if (gErr) return res.status(400).json({ error: gErr.message });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+
+    const reason = req.body?.reason ? String(req.body.reason) : "filled";
+    const nowIso = new Date().toISOString();
+
+    // Preferred schema: status/closed_at/closed_reason
+    const updatePayload = {
+      status: "closed",
+      closed_at: nowIso,
+      closed_reason: reason,
+      // Also set expires_at to now so older clients that only rely on expiry will stop seeing it.
+      expires_at: nowIso,
+    };
+
+    let updated = null;
+    let uErr = null;
+
+    ({ data: updated, error: uErr } = await supabaseAdmin
+      .from("jobs")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("*")
+      .single());
+
+    if (uErr) {
+      const msg = String(uErr.message || "");
+      // Fallback for old schema (no status/closed columns)
+      if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
+        const r2 = await supabaseAdmin
+          .from("jobs")
+          .update({ expires_at: nowIso })
+          .eq("id", id)
+          .select("*")
+          .single();
+        if (r2.error) return res.status(400).json({ error: r2.error.message });
+        updated = r2.data;
+      } else {
+        return res.status(400).json({ error: msg });
+      }
+    }
+
+    await logEvent("job_close", req.authUser.id, { job_id: id, reason });
+
+    // Map to app shape
+    return res.json({
+      id: updated.id,
+      title: updated.title,
+      category: updated.category,
+      description: updated.description,
+      wage: updated.wage,
+      whatsapp: updated.whatsapp,
+      isDaily: updated.is_daily,
+      jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      durationDays: (updated.duration_days ?? null),
+      expiresAt: (updated.expires_at ?? null),
+      notifyRadiusM: updated.notify_radius_m,
+      createdAt: updated.created_at,
+      createdBy: updated.created_by,
+      status: (updated.status || "closed"),
+      closedAt: (updated.closed_at ?? nowIso),
+      closedReason: (updated.closed_reason ?? reason),
+      location: { lat: updated.location_lat, lng: updated.location_lng, address: updated.location_address },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Backward/alternate path support (some clients may call singular `/job`)
+app.patch("/job/:id/close", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can close jobs" });
+
+    const { data: row, error: gErr } = await supabaseAdmin
+      .from("jobs")
+      .select("id, created_by, is_daily, job_type, duration_days")
+      .eq("id", id)
+      .maybeSingle();
+    if (gErr) return res.status(400).json({ error: gErr.message });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+
+    const reason = req.body?.reason ? String(req.body.reason) : "filled";
+    const nowIso = new Date().toISOString();
+
+    const updatePayload = {
+      status: "closed",
+      closed_at: nowIso,
+      closed_reason: reason,
+      expires_at: nowIso,
+    };
+
+    let updated = null;
+    let uErr = null;
+    ({ data: updated, error: uErr } = await supabaseAdmin
+      .from("jobs")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("*")
+      .single());
+
+    if (uErr) {
+      const msg = String(uErr.message || "");
+      if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
+        const r2 = await supabaseAdmin
+          .from("jobs")
+          .update({ expires_at: nowIso })
+          .eq("id", id)
+          .select("*")
+          .single();
+        if (r2.error) return res.status(400).json({ error: r2.error.message });
+        updated = r2.data;
+      } else {
+        return res.status(400).json({ error: msg });
+      }
+    }
+
+    await logEvent("job_close", req.authUser.id, { job_id: id, reason });
+
+    return res.json({
+      id: updated.id,
+      title: updated.title,
+      category: updated.category,
+      description: updated.description,
+      wage: updated.wage,
+      whatsapp: updated.whatsapp,
+      isDaily: updated.is_daily,
+      jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      durationDays: (updated.duration_days ?? null),
+      expiresAt: (updated.expires_at ?? null),
+      notifyRadiusM: updated.notify_radius_m,
+      createdAt: updated.created_at,
+      createdBy: updated.created_by,
+      status: (updated.status || "closed"),
+      closedAt: (updated.closed_at ?? nowIso),
+      closedReason: (updated.closed_reason ?? reason),
+      location: { lat: updated.location_lat, lng: updated.location_lng, address: updated.location_address },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Re-open a job (employer owner only)
+app.patch("/jobs/:id/reopen", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can reopen jobs" });
+
+    const { data: row, error: gErr } = await supabaseAdmin
+      .from("jobs")
+      .select("id, created_by, job_type, duration_days, is_daily")
+      .eq("id", id)
+      .maybeSingle();
+    if (gErr) return res.status(400).json({ error: gErr.message });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+
+    const jt = normalizeJobType(row.job_type || null, !!row.is_daily);
+    const expiresAt = computeExpiresAt(jt, toNum(row.duration_days) || 1);
+
+    let updated = null;
+    let uErr = null;
+    ({ data: updated, error: uErr } = await supabaseAdmin
+      .from("jobs")
+      .update({ status: "open", closed_at: null, closed_reason: null, expires_at: expiresAt })
+      .eq("id", id)
+      .select("*")
+      .single());
+
+    if (uErr) {
+      const msg = String(uErr.message || "");
+      if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
+        const r2 = await supabaseAdmin
+          .from("jobs")
+          .update({ expires_at: expiresAt })
+          .eq("id", id)
+          .select("*")
+          .single();
+        if (r2.error) return res.status(400).json({ error: r2.error.message });
+        updated = r2.data;
+      } else {
+        return res.status(400).json({ error: msg });
+      }
+    }
+
+    await logEvent("job_reopen", req.authUser.id, { job_id: id });
+
+    return res.json({
+      id: updated.id,
+      title: updated.title,
+      category: updated.category,
+      description: updated.description,
+      wage: updated.wage,
+      whatsapp: updated.whatsapp,
+      isDaily: updated.is_daily,
+      jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      durationDays: (updated.duration_days ?? null),
+      expiresAt: (updated.expires_at ?? expiresAt),
+      notifyRadiusM: updated.notify_radius_m,
+      createdAt: updated.created_at,
+      createdBy: updated.created_by,
+      status: (updated.status || "open"),
+      closedAt: (updated.closed_at ?? null),
+      closedReason: (updated.closed_reason ?? null),
+      location: { lat: updated.location_lat, lng: updated.location_lng, address: updated.location_address },
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Backward/alternate path support (some clients may call singular `/job`)
+app.patch("/job/:id/reopen", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can reopen jobs" });
+
+    const { data: row, error: gErr } = await supabaseAdmin
+      .from("jobs")
+      .select("id, created_by, job_type, duration_days, is_daily")
+      .eq("id", id)
+      .maybeSingle();
+    if (gErr) return res.status(400).json({ error: gErr.message });
+    if (!row) return res.status(404).json({ error: "Not found" });
+    if (row.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+
+    const jt = normalizeJobType(row.job_type || null, !!row.is_daily);
+    const expiresAt = computeExpiresAt(jt, toNum(row.duration_days) || 1);
+
+    let updated = null;
+    let uErr = null;
+    ({ data: updated, error: uErr } = await supabaseAdmin
+      .from("jobs")
+      .update({ status: "open", closed_at: null, closed_reason: null, expires_at: expiresAt })
+      .eq("id", id)
+      .select("*")
+      .single());
+
+    if (uErr) {
+      const msg = String(uErr.message || "");
+      if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
+        const r2 = await supabaseAdmin
+          .from("jobs")
+          .update({ expires_at: expiresAt })
+          .eq("id", id)
+          .select("*")
+          .single();
+        if (r2.error) return res.status(400).json({ error: r2.error.message });
+        updated = r2.data;
+      } else {
+        return res.status(400).json({ error: msg });
+      }
+    }
+
+    await logEvent("job_reopen", req.authUser.id, { job_id: id });
+
+    return res.json({
+      id: updated.id,
+      title: updated.title,
+      category: updated.category,
+      description: updated.description,
+      wage: updated.wage,
+      whatsapp: updated.whatsapp,
+      isDaily: updated.is_daily,
+      jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      durationDays: (updated.duration_days ?? null),
+      expiresAt: (updated.expires_at ?? null),
+      notifyRadiusM: updated.notify_radius_m,
+      createdAt: updated.created_at,
+      createdBy: updated.created_by,
+      status: (updated.status || "open"),
+      closedAt: (updated.closed_at ?? null),
+      closedReason: (updated.closed_reason ?? null),
+      location: { lat: updated.location_lat, lng: updated.location_lng, address: updated.location_address },
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
