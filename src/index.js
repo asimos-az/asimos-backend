@@ -564,6 +564,15 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       ? Number(body.location_lng)
       : null;
 
+    // Admin-created jobs must include a valid location, otherwise seeker screens
+    // (which always use location+radius filtering) will not return the job at all.
+    if (!Number.isFinite(location_lat) || !Number.isFinite(location_lng)) {
+      return res.status(400).json({ error: "Lokasiya seçilməlidir (xəritədən seçin)" });
+    }
+    if (location_lat < -90 || location_lat > 90 || location_lng < -180 || location_lng > 180) {
+      return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
+    }
+
     const insertRow = {
       created_by,
       title,
@@ -1097,7 +1106,10 @@ app.post("/auth/verify-otp", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
-    await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
+
+    // This is a refresh endpoint (not register/verify). Don't reference variables
+    // that are out of scope (older builds used `finalRole` here by mistake).
+    await logEvent("auth_refresh", userId, { role: profile?.role || null });
 
     return res.json({
       token: signin.session.access_token,
@@ -1175,7 +1187,9 @@ app.post("/auth/refresh", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
-    await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
+
+    // Refresh endpoint: log a refresh event without relying on out-of-scope vars.
+    await logEvent("auth_refresh", userId, { role: profile?.role || null });
 
     return res.json({
       token: accessToken,
