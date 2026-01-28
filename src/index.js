@@ -579,7 +579,14 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       status: body.status ? String(body.status) : "open",
     };
 
-    const { data, error } = await supabaseAdmin.from("jobs").insert(insertRow).select("*").single();
+    // Some older DB schemas may not have the `status` column yet.
+    // If insert fails specifically due to missing column, retry without status (best-effort).
+    let insertRes = await supabaseAdmin.from("jobs").insert(insertRow).select("*").single();
+    if (insertRes.error && /\bstatus\b/i.test(insertRes.error.message || "")) {
+      const { status, ...withoutStatus } = insertRow;
+      insertRes = await supabaseAdmin.from("jobs").insert(withoutStatus).select("*").single();
+    }
+    const { data, error } = insertRes;
     if (error) return res.status(400).json({ error: error.message });
 
     // Trigger seeker notifications (best-effort)
