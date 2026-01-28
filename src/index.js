@@ -252,6 +252,19 @@ function toNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function isValidLatLng(lat, lng) {
+  return (
+    typeof lat === "number" &&
+    typeof lng === "number" &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180
+  );
+}
+
 function haversineDistanceM(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -1204,6 +1217,14 @@ app.patch("/me/location", requireAuth, async (req, res) => {
     if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") {
       return res.status(400).json({ error: "Invalid location" });
     }
+    if (!isValidLatLng(loc.lat, loc.lng)) {
+      return res.status(400).json({ error: "Invalid location range" });
+    }
+
+    // Prevent broken coordinates (this would make seeker listings return 0 items)
+    if (!isValidLatLng(loc.lat, loc.lng)) {
+      return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
+    }
 
     const { error } = await supabaseAdmin
       .from("profiles")
@@ -1374,8 +1395,13 @@ app.get("/jobs", requireAuth, async (req, res) => {
     const daily = (dailyRaw === undefined || dailyRaw === null || dailyRaw === "") ? null : (String(dailyRaw) === "true");
 
     const profile = await getProfile(req.authUser.id);
-    const baseLat = toNum(req.query.lat) ?? toNum(profile?.location?.lat);
-    const baseLng = toNum(req.query.lng) ?? toNum(profile?.location?.lng);
+    let baseLat = toNum(req.query.lat) ?? toNum(profile?.location?.lat);
+    let baseLng = toNum(req.query.lng) ?? toNum(profile?.location?.lng);
+    // Guard against bad data (e.g. manual input like 98789797)
+    if (baseLat !== null && baseLng !== null && !isValidLatLng(baseLat, baseLng)) {
+      baseLat = null;
+      baseLng = null;
+    }
     const radiusM = toNum(req.query.radius_m) ?? null;
 
     // Auto-delete expired jobs (best-effort)
@@ -1422,10 +1448,15 @@ app.get("/jobs", requireAuth, async (req, res) => {
       if (expiresMs === null && (r.is_daily === false || r.is_daily === null) && createdMs !== null && createdMs <= (nowMs - 28 * MS_DAY)) return null;
 
       const loc = {
-        lat: r.location_lat,
-        lng: r.location_lng,
+        lat: (typeof r.location_lat === "number" ? r.location_lat : toNum(r.location_lat)),
+        lng: (typeof r.location_lng === "number" ? r.location_lng : toNum(r.location_lng)),
         address: r.location_address,
       };
+
+      if (!isValidLatLng(loc.lat, loc.lng)) {
+        loc.lat = null;
+        loc.lng = null;
+      }
       const job = {
         id: r.id,
         title: r.title,
@@ -1561,9 +1592,29 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     const expiresAt = computeExpiresAt(jt, dDays || 1);
 
-    const locLat = toNum(location?.lat);
-    const locLng = toNum(location?.lng);
-    const locAddr = location?.address ? String(location.address) : null;
+    let locLat = toNum(location?.lat);
+    let locLng = toNum(location?.lng);
+    let locAddr = location?.address ? String(location.address) : null;
+
+    // Some clients may fail to send location. In that case, fallback to employer profile location
+    // so seekers can still see the job in radius-based listings.
+    if ((locLat === null || locLng === null) && profile?.location) {
+      const pLat = toNum(profile.location.lat);
+      const pLng = toNum(profile.location.lng);
+      if (pLat !== null && pLng !== null) {
+        locLat = pLat;
+        locLng = pLng;
+        if (!locAddr && profile.location.address) locAddr = String(profile.location.address);
+      }
+    }
+
+    // Hard validation: avoid corrupt coordinates (e.g. manual input)
+    if (locLat === null || locLng === null) {
+      return res.status(400).json({ error: "Lokasiya seçilməlidir" });
+    }
+    if (!isValidLatLng(locLat, locLng)) {
+      return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
+    }
 
     const payload = {
       created_by: req.authUser.id,
