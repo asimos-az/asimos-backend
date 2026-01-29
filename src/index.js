@@ -377,6 +377,33 @@ async function requireAuth(req, res, next) {
   }
 }
 
+// Optional auth: attach req.authUser if a valid bearer token is present,
+// but never block the request. This enables guest browsing.
+async function optionalAuth(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) {
+      req.authUser = null;
+      req.accessToken = null;
+      return next();
+    }
+    const { data, error } = await supabaseAnon.auth.getUser(token);
+    if (error || !data?.user) {
+      req.authUser = null;
+      req.accessToken = null;
+      return next();
+    }
+    req.authUser = data.user;
+    req.accessToken = token;
+    return next();
+  } catch {
+    req.authUser = null;
+    req.accessToken = null;
+    return next();
+  }
+}
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 // -------------------- Admin API --------------------
 app.post("/admin/login", async (req, res) => {
@@ -1392,7 +1419,8 @@ app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
 });
 
 // List jobs (search + optional createdBy filter)
-app.get("/jobs", requireAuth, async (req, res) => {
+// Guest mode supported: if no auth token is provided, returns latest open jobs.
+app.get("/jobs", optionalAuth, async (req, res) => {
   try {
     const createdBy = req.query.createdBy ? String(req.query.createdBy) : null;
 
@@ -1400,7 +1428,7 @@ app.get("/jobs", requireAuth, async (req, res) => {
     const dailyRaw = req.query.daily;
     const daily = (dailyRaw === undefined || dailyRaw === null || dailyRaw === "") ? null : (String(dailyRaw) === "true");
 
-    const profile = await getProfile(req.authUser.id);
+    const profile = req.authUser ? await getProfile(req.authUser.id) : null;
     let baseLat = toNum(req.query.lat) ?? toNum(profile?.location?.lat);
     let baseLng = toNum(req.query.lng) ?? toNum(profile?.location?.lng);
     // Guard against bad data (e.g. manual input like 98789797)
@@ -1420,6 +1448,7 @@ app.get("/jobs", requireAuth, async (req, res) => {
       .limit(200);
 
     if (createdBy) {
+      if (!req.authUser) return res.status(401).json({ error: "Unauthorized" });
       // Security: only allow "my jobs" filter for the current user
       if (createdBy !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
       query = query.eq("created_by", req.authUser.id);
@@ -1469,9 +1498,10 @@ app.get("/jobs", requireAuth, async (req, res) => {
         category: r.category,
         description: r.description,
         wage: r.wage,
-        whatsapp: r.whatsapp,
-        phone: (r.contact_phone ?? null),
-        link: (r.contact_link ?? null),
+        // Hide contact fields for guests; app will prompt users to login to see them.
+        whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
+        phone: req.authUser ? (r.contact_phone ?? null) : null,
+        link: req.authUser ? (r.contact_link ?? null) : null,
         voen: (r.voen ?? null),
         isDaily: r.is_daily,
         jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
@@ -1501,9 +1531,19 @@ app.get("/jobs", requireAuth, async (req, res) => {
       items.sort((a, b) => (a.distanceM ?? 1e18) - (b.distanceM ?? 1e18));
     }
 
-    // Hide closed jobs from seekers by default
-    if (profile?.role === "seeker") {
+    // Hide closed jobs for guests + seekers by default
+    if (!profile || profile?.role === "seeker") {
       items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
+    }
+
+    // Guest mode: do not expose contact details without login.
+    if (!req.authUser) {
+      items = items.map((j) => ({
+        ...j,
+        whatsapp: null,
+        phone: null,
+        link: null,
+      }));
     }
 
     return res.json(items);
@@ -1513,7 +1553,8 @@ app.get("/jobs", requireAuth, async (req, res) => {
 });
 
 // Get a single job by id
-app.get("/jobs/:id", requireAuth, async (req, res) => {
+// Guest mode supported: contacts are hidden without login.
+app.get("/jobs/:id", optionalAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "id required" });
@@ -1530,7 +1571,7 @@ app.get("/jobs/:id", requireAuth, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
     if (!data) return res.status(404).json({ error: "Not found" });
 
-    const profile = await getProfile(req.authUser.id);
+    const profile = req.authUser ? await getProfile(req.authUser.id) : null;
     const baseLat = toNum(profile?.location?.lat);
     const baseLng = toNum(profile?.location?.lng);
 
@@ -1540,9 +1581,9 @@ app.get("/jobs/:id", requireAuth, async (req, res) => {
       category: data.category,
       description: data.description,
       wage: data.wage,
-      whatsapp: data.whatsapp,
-      phone: (data.contact_phone ?? null),
-      link: (data.contact_link ?? null),
+      whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
+      phone: req.authUser ? (data.contact_phone ?? null) : null,
+      link: req.authUser ? (data.contact_link ?? null) : null,
       voen: (data.voen ?? null),
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
@@ -1557,8 +1598,8 @@ app.get("/jobs/:id", requireAuth, async (req, res) => {
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
 
-    // If seeker tries to open a closed job, hide it (acts like not found)
-    if (profile?.role === "seeker" && String(job.status || "open").toLowerCase() === "closed") {
+    // Hide closed jobs from seekers + guests (acts like not found)
+    if ((!profile || profile?.role === "seeker") && String(job.status || "open").toLowerCase() === "closed") {
       return res.status(404).json({ error: "Not found" });
     }
 
