@@ -109,3 +109,30 @@ alter table public.jobs
 
 alter table public.jobs
   add column if not exists contact_link text;
+
+-- Ratings System
+create table if not exists public.ratings (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  reviewer_id uuid not null references public.profiles(id),
+  target_id uuid not null references public.profiles(id),
+  job_id uuid not null references public.jobs(id),
+  score integer not null check (score >= 1 and score <= 5),
+  comment text,
+  unique (reviewer_id, job_id)
+);
+
+create index if not exists ratings_target_id_idx on public.ratings (target_id);
+create index if not exists ratings_reviewer_id_idx on public.ratings (reviewer_id);
+
+-- User Rating Stats
+alter table public.profiles
+  add column if not exists average_rating double precision default 0,
+  add column if not exists rating_count integer default 0;
+
+-- Job Boosting (Premium 1 week)
+alter table public.jobs
+  add column if not exists boosted_until timestamptz;
+
+create index if not exists jobs_boosted_until_idx on public.jobs (boosted_until desc);
+

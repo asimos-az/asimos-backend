@@ -536,7 +536,7 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
     const id = req.params.id;
 
     await supabaseAdmin.from("profiles").delete().eq("id", id);
-    try { await supabaseAdmin.auth.admin.deleteUser(id); } catch {}
+    try { await supabaseAdmin.auth.admin.deleteUser(id); } catch { }
 
     await logEvent("admin_user_deleted", null, { target_user_id: id });
     return res.json({ ok: true });
@@ -585,7 +585,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     // Validate employer exists
     const { data: emp, error: empErr } = await supabaseAdmin
       .from("profiles")
-      .select("id, role")
+      .select("id, role, average_rating")
       .eq("id", created_by)
       .single();
     if (empErr || !emp) return res.status(400).json({ error: "Employer user not found" });
@@ -628,8 +628,16 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lat: Number.isFinite(location_lat) ? location_lat : null,
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
+      location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
     };
+
+    // Check for Premium Boosting (Rating >= 4.8)
+    if (emp.average_rating && emp.average_rating >= 4.8) {
+      const boostDate = new Date();
+      boostDate.setDate(boostDate.getDate() + 7); // +1 week
+      insertRow.boosted_until = boostDate.toISOString();
+    }
 
     // Some older DB schemas may not have the `status` column yet.
     // If insert fails specifically due to missing column, retry without status (best-effort).
@@ -653,7 +661,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
         },
       };
       await notifyNearbySeekers(jobForNotify);
-    } catch {}
+    } catch { }
 
     await logEvent("admin_job_created", null, { job_id: data.id, created_by });
     return res.json({ ok: true, job: data });
@@ -971,7 +979,7 @@ app.post("/auth/register", async (req, res) => {
             location: location || null,
           },
         });
-      } catch {}
+      } catch { }
 
       try {
         await supabaseAdmin.from("profiles").upsert({
@@ -982,7 +990,7 @@ app.post("/auth/register", async (req, res) => {
           phone: phone || null,
           location: location || null,
         });
-      } catch {}
+      } catch { }
     }
 
     await logEvent("auth_register_request", otpUserId || null, { email, role, hasCompanyName: !!companyName });
@@ -1122,7 +1130,7 @@ app.post("/auth/verify-otp", async (req, res) => {
           location: finalLocation,
         },
       });
-    } catch {}
+    } catch { }
 
     const { error: profErr } = await supabaseAdmin.from("profiles").upsert({
       id: userId,
@@ -1298,8 +1306,8 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       .from("profiles")
       .update({ expo_push_token: expoPushToken })
       .eq("id", req.authUser.id)
-      .then(() => {})
-      .catch(() => {});
+      .then(() => { })
+      .catch(() => { });
     await logEvent("push_token_saved", req.authUser.id, { hasToken: true });
     return res.json({ ok: true });
   } catch (e) {
@@ -1315,18 +1323,73 @@ app.delete("/me/push-token", requireAuth, async (req, res) => {
       .from("push_tokens")
       .delete()
       .eq("user_id", req.authUser.id)
-      .then(() => {})
-      .catch(() => {});
+      .then(() => { })
+      .catch(() => { });
 
     // 2) Best-effort legacy storage clear
     await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: null })
       .eq("id", req.authUser.id)
-      .then(() => {})
-      .catch(() => {});
+      .then(() => { })
+      .catch(() => { });
 
     await logEvent("push_token_removed", req.authUser.id, { hasToken: false });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Ratings
+app.post("/ratings", requireAuth, async (req, res) => {
+  try {
+    const { target_id, job_id, score, comment } = req.body || {};
+    if (!target_id || !job_id || !score) return res.status(400).json({ error: "Missing fields" });
+
+    const numScore = Number(score);
+    if (!Number.isInteger(numScore) || numScore < 1 || numScore > 5) {
+      return res.status(400).json({ error: "Score must be 1-5" });
+    }
+
+    if (req.authUser.id === target_id) return res.status(400).json({ error: "Cannot rate yourself" });
+
+    // 1. Insert Rating
+    const { error: insErr } = await supabaseAdmin.from("ratings").insert({
+      reviewer_id: req.authUser.id,
+      target_id,
+      job_id,
+      score: numScore,
+      comment: String(comment || "").trim(),
+    });
+
+    if (insErr) {
+      if (insErr.message.includes("unique")) {
+        return res.status(400).json({ error: "Siz bu elan üçün artıq reytinq vermisiniz." });
+      }
+      return res.status(400).json({ error: insErr.message });
+    }
+
+    // 2. Recalculate Average
+    // Fetch all ratings for this target
+    const { data: allRatings, error: rErr } = await supabaseAdmin
+      .from("ratings")
+      .select("score")
+      .eq("target_id", target_id);
+
+    if (!rErr && allRatings) {
+      const count = allRatings.length;
+      const sum = allRatings.reduce((acc, r) => acc + r.score, 0);
+      const avg = count > 0 ? sum / count : 0;
+
+      await supabaseAdmin
+        .from("profiles")
+        .update({ average_rating: avg, rating_count: count })
+        .eq("id", target_id);
+
+      await logEvent("user_rated", req.authUser.id, { target_id, score: numScore, new_avg: avg });
+    }
+
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -1444,6 +1507,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     let query = supabaseAdmin
       .from("jobs")
       .select("*")
+      .order("boosted_until", { ascending: false, nullsFirst: false }) // Boosted first
       .order("created_at", { ascending: false })
       .limit(200);
 
@@ -1513,6 +1577,9 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         status: (r.status || "open"),
         closedAt: (r.closed_at ?? null),
         closedReason: (r.closed_reason ?? null),
+        closedAt: (r.closed_at ?? null),
+        closedReason: (r.closed_reason ?? null),
+        boostedUntil: (r.boosted_until ?? null),
         location: loc,
       };
 
@@ -1735,7 +1802,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       title: data.title,
       category: data.category,
       description: data.description,
-      wage: data.wage,      whatsapp: data.whatsapp,
+      wage: data.wage, whatsapp: data.whatsapp,
       phone: data.contact_phone ?? null,
       link: data.contact_link ?? null,
       voen: data.voen ?? null,
@@ -1829,7 +1896,7 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
       title: updated.title,
       category: updated.category,
       description: updated.description,
-      wage: updated.wage,      whatsapp: updated.whatsapp,
+      wage: updated.wage, whatsapp: updated.whatsapp,
       phone: updated.contact_phone ?? null,
       link: updated.contact_link ?? null,
       voen: updated.voen ?? null,
