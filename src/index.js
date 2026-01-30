@@ -513,12 +513,16 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
       phone: patch.phone,
       location: patch.location,
       expo_push_token: patch.expo_push_token,
+      status: patch.status,
     };
 
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
     if (allowed.role && !["seeker", "employer"].includes(allowed.role)) {
       return res.status(400).json({ error: "Invalid role" });
+    }
+    if (allowed.status && !["active", "pending", "suspended"].includes(allowed.status)) {
+      return res.status(400).json({ error: "Invalid status" });
     }
 
     const { data, error } = await supabaseAdmin.from("profiles").update(allowed).eq("id", id).select("*").single();
@@ -689,6 +693,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       location_lat: patch.location_lat,
       location_lng: patch.location_lng,
       location_address: patch.location_address,
+      status: patch.status,
     };
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
@@ -1066,6 +1071,13 @@ app.post("/auth/login", async (req, res) => {
     const profile = await getProfile(signin.user.id);
     await logEvent("auth_login", signin.user.id, { email });
 
+    if (profile?.status === "pending") {
+      return res.status(403).json({ error: "Hesabınız təsdiq gözləyir. Admin təsdiqindən sonra daxil ola bilərsiniz." });
+    }
+    if (profile?.status === "suspended") {
+      return res.status(403).json({ error: "Hesabınız bloklanıb." });
+    }
+
     return res.json({
       token: signin.session.access_token,
       refreshToken: signin.session.refresh_token,
@@ -1139,6 +1151,8 @@ app.post("/auth/verify-otp", async (req, res) => {
       company_name: finalCompanyName,
       phone: finalPhone,
       location: finalLocation,
+      // Employers start as 'pending', Seekers as 'active'
+      status: finalRole === "employer" ? "pending" : "active",
     });
 
     if (profErr) return res.status(400).json({ error: profErr.message });
@@ -1741,9 +1755,19 @@ app.post("/jobs", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
     }
 
+    // Check if this is the first job (for moderation)
+    const { count: existingJobsCount } = await supabaseAdmin
+      .from("jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("created_by", req.authUser.id)
+      .in("status", ["open", "closed"]);
+
+    // First job -> pending. Subsequent -> open.
+    const initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
+
     const payload = {
       created_by: req.authUser.id,
-      status: "open",
+      status: initialStatus,
       title,
       category: category || null,
       description: description || "",
