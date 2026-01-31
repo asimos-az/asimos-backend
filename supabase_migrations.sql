@@ -136,3 +136,21 @@ alter table public.jobs
 
 create index if not exists jobs_boosted_until_idx on public.jobs (boosted_until desc);
 
+
+-- JOB ALERTS (İş Bildirişləri)
+CREATE TABLE IF NOT EXISTS public.job_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    query TEXT,          -- Açar söz (məs: "ofisiant", "sürücü")
+    min_wage NUMERIC,
+    max_wage NUMERIC,
+    job_type TEXT,       -- 'permanent', 'temporary'
+    location_lat NUMERIC,
+    location_lng NUMERIC,
+    radius_m INTEGER,    -- Xəritədə seçilən radius (metrlə)
+    channel TEXT DEFAULT 'push', -- 'push', 'email', 'both' (gələcək üçün)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Index for faster matching
+CREATE INDEX IF NOT EXISTS idx_job_alerts_user_id ON public.job_alerts(user_id);

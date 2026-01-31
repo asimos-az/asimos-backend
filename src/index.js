@@ -1643,34 +1643,94 @@ app.patch("/me/notifications/:id/read", requireAuth, async (req, res) => {
       .eq("id", id)
       .eq("user_id", req.authUser.id);
 
-    if (error) {
-      const msg = String(error.message || "");
-      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ ok: true });
-      return res.status(400).json({ error: error.message });
-    }
+    if (error) return res.status(400).json({ error: error.message });
     return res.json({ ok: true });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(500).json({ error: e.message });
   }
 });
 
 app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
   try {
-    const { error } = await supabaseAdmin
+    await supabaseAdmin
       .from("notifications")
-      .update({ read_at: new Date().toISOString() })
+      .update({ read_at: new Date() })
       .eq("user_id", req.authUser.id)
       .is("read_at", null);
-
-    if (error) {
-      const msg = String(error.message || "");
-      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ ok: true });
-      return res.status(400).json({ error: error.message });
-    }
-
     return res.json({ ok: true });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// -------------------- Job Alerts (İş Bildirişləri) --------------------
+
+// List alerts
+app.get("/me/alerts", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("job_alerts")
+      .select("*")
+      .eq("user_id", req.authUser.id)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json(data || []);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Create alert
+app.post("/me/alerts", requireAuth, async (req, res) => {
+  try {
+    const { query, min_wage, max_wage, job_type, location, radius_m } = req.body;
+
+    // Validate: at least one criteria
+    if (!query && !min_wage && !job_type && !location) {
+      return res.status(400).json({ error: "Ən azı bir kriteriya seçilməlidir (açar söz, maaş, növ və ya məkan)." });
+    }
+
+    const payload = {
+      user_id: req.authUser.id,
+      query: (query || "").trim() || null,
+      min_wage: Number(min_wage) || null,
+      max_wage: Number(max_wage) || null,
+      job_type: job_type || null,
+      location_lat: location?.lat || null,
+      location_lng: location?.lng || null,
+      radius_m: Number(radius_m) || null,
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from("job_alerts")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("alert_create", req.authUser.id, { alert_id: data.id });
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete alert
+app.delete("/me/alerts/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabaseAdmin
+      .from("job_alerts")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", req.authUser.id);
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -2040,6 +2100,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title, job_type: job.jobType, duration_days: job.durationDays });
 
+    // Fire-and-forget: check detailed job alerts
+    processJobAlerts(job).catch((e) => console.warn("processJobAlerts failed", e?.message || e));
+
     // Fire-and-forget: notify nearby seekers (push notifications), if enabled.
     // This will not block the API response.
     notifyNearbySeekers(job).catch((e) => console.warn("notifyNearbySeekers failed", e?.message || e));
@@ -2358,6 +2421,77 @@ app.patch("/job/:id/reopen", requireAuth, async (req, res) => {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
+
+// -------------------- Helpers --------------------
+
+function getDistanceM(lat1, lon1, lat2, lon2) {
+  if (!lat1 || !lon1 || !lat2 || !lon2) return 99999999;
+  const R = 6371e3; // metres
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) *
+    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
+}
+
+async function processJobAlerts(job) {
+  try {
+    // Fetch all alerts (optimize later if needed)
+    const { data: alerts, error } = await supabaseAdmin.from("job_alerts").select("*");
+    if (error || !alerts?.length) return;
+
+    const notifications = [];
+    const jobLat = job.location_lat;
+    const jobLng = job.location_lng;
+    const jobTxt = (job.title + " " + (job.description || "")).toLowerCase();
+
+    for (const alert of alerts) {
+      // Don't notify the creator
+      if (alert.user_id === job.created_by) continue;
+
+      // 1. Check Job Type
+      if (alert.job_type && alert.job_type !== job.job_type) continue;
+
+      // 2. Check Wage
+      // If alert has min_wage, job wage must be >= min_wage
+      if (alert.min_wage && (job.wage || 0) < alert.min_wage) continue;
+      // If alert has max_wage, job wage must be <= max_wage (rare case, usually users want min)
+      if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
+
+      // 3. Check Query
+      if (alert.query) {
+        if (!jobTxt.includes(alert.query.toLowerCase())) continue;
+      }
+
+      // 4. Check Location (Radius)
+      if (alert.location_lat && alert.location_lng && alert.radius_m) {
+        const dist = getDistanceM(alert.location_lat, alert.location_lng, jobLat, jobLng);
+        if (dist > alert.radius_m) continue;
+      }
+
+      // Match found
+      notifications.push({
+        user_id: alert.user_id,
+        title: "Yeni İş Elanı: " + job.title,
+        body: `Axtarışınıza uyğun yeni elan: ${job.wage ? job.wage + " AZN" : "Maaş razılaşma ilə"}`,
+        data: { type: "job", id: job.id }, // Navigate to job details
+      });
+    }
+
+    if (notifications.length > 0) {
+      await supabaseAdmin.from("notifications").insert(notifications);
+      console.log(`[JobAlerts] Created ${notifications.length} notifications for Job ${job.id}`);
+    }
+  } catch (e) {
+    console.error("[JobAlerts] Error:", e);
+  }
+}
 
 app.listen(PORT, () => {
   console.log(`Asimos backend running on :${PORT}`);
