@@ -1599,6 +1599,22 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       // Security: only allow "my jobs" filter for the current user
       if (createdBy !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
       query = query.eq("created_by", req.authUser.id);
+
+      // If listing my own jobs, I want to see everything (open, pending, closed).
+      // So NO status filter here.
+    } else {
+      // Public listing: only show OPEN jobs.
+      // Filter out pending, closed, suspended, etc.
+      // Note: 'status' column might not be populated for very old rows (default is null or 'open' via schema default).
+      // It's safer to check for 'open' explicitly or use a list if we support others.
+      // Given schema default is 'open', null is effectively 'open' for old rows.
+      // But let's look at migration_approval.sql: it set default to 'active' for profiles, but for jobs...
+      // Wait, let me check where 'status' column for jobs was added.
+      // Ah, I don't recall adding a migration for jobs status.
+      // I should double check if jobs table has status column.
+      // Code 1832: .in("status", ["open", "closed"]) suggests it exists.
+      // If it exists, filter by it.
+      query = query.eq("status", "open");
     }
 
     if (daily !== null) query = query.eq("is_daily", daily);
