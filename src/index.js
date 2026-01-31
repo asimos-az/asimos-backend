@@ -3,8 +3,45 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
-import path from "path";
-import { fileURLToPath } from "url";
+import nodemailer from "nodemailer"; // Add this to imports
+
+// ... existing imports ...
+
+// SMTP Configuration (for approval emails)
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT || 587;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || "no-reply@asimos.local";
+
+const mailer = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: Number(SMTP_PORT) === 465, // true for 465, false for other ports
+  auth: {
+    user: SMTP_USER,
+    pass: SMTP_PASS,
+  },
+});
+
+async function sendApprovalEmail(toEmail, fullName) {
+  if (!SMTP_HOST || !SMTP_USER) {
+    console.warn("SMTP not configured, skipping approval email to:", toEmail);
+    return;
+  }
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: toEmail,
+      subject: "ASIMOS - Hesabınız Təsdiqləndi",
+      text: `Salam ${fullName},\n\nHesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.\n\nHörmətlə,\nAsimos Komandası`,
+      html: `<p>Salam <b>${fullName}</b>,</p><p>Hesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.</p><p>Hörmətlə,<br>Asimos Komandası</p>`,
+    });
+    console.log("Approval email sent to:", toEmail);
+  } catch (e) {
+    console.error("Failed to send approval email:", e);
+  }
+}
 
 const app = express();
 app.use(cors());
@@ -39,8 +76,6 @@ const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 //   alter table public.profiles add column if not exists expo_push_token text;
 const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";// Static Super Admin (for React Admin Panel)
 // You can override these via env vars on Render.
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@asimos.local";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || "change_me_super_secret";
 const ADMIN_TOKEN_TTL_SEC = Number(process.env.ADMIN_TOKEN_TTL_SEC || 60 * 60 * 24 * 7); // 7 days
 
@@ -525,8 +560,26 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Invalid status" });
     }
 
+    // Check previous state for email trigger
+    let shouldSendEmail = false;
+    if (allowed.status === "active") {
+      const { data: oldProfile } = await supabaseAdmin.from("profiles").select("status").eq("id", id).single();
+      if (oldProfile && oldProfile.status === "pending") {
+        shouldSendEmail = true;
+      }
+    }
+
     const { data, error } = await supabaseAdmin.from("profiles").update(allowed).eq("id", id).select("*").single();
     if (error) return res.status(400).json({ error: error.message });
+
+    if (shouldSendEmail) {
+      // Need email address from Auth user
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id);
+      if (authUser?.user?.email) {
+        // Run in background
+        sendApprovalEmail(authUser.user.email, data.full_name || "İstifadəçi").catch(console.error);
+      }
+    }
 
     await logEvent("admin_user_updated", null, { target_user_id: id, patch: allowed });
     return res.json({ ok: true, user: data });
@@ -1175,6 +1228,18 @@ app.post("/auth/verify-otp", async (req, res) => {
 
     const profile = await getProfile(userId);
     await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
+
+    // STRICT REGISTRATION: If pending, do NOT return token to prevent auto-login.
+    if (profile?.status === "pending") {
+      return res.json({
+        ok: true,
+        pendingApproval: true,
+        message: "Qeydiyyat tamamlandı. Hesabınız admin təsdiqindən sonra aktivləşəcək. Təsdiq olunduqda sizə email gələcək.",
+        user: profileToUser(profile, signin.user),
+        token: null,
+        refreshToken: null,
+      });
+    }
 
     return res.json({
       token: signin.session.access_token,
