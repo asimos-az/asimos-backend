@@ -3,7 +3,9 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
-import nodemailer from "nodemailer"; // Add this to imports
+import nodemailer from "nodemailer";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // ... existing imports ...
 
