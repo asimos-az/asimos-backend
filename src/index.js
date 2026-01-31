@@ -1479,7 +1479,81 @@ app.post("/ratings", requireAuth, async (req, res) => {
   }
 });
 
+// -------------------- Forgot Password --------------------
+
+// 1. Send OTP for password reset
+app.post("/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ error: "Email required" });
+
+    // Send OTP
+    const { error } = await supabaseAnon.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: false },
+    });
+
+    if (error) {
+      const msg = error.message || "Auth error";
+      const lower = msg.toLowerCase();
+      if (lower.includes("rate") && lower.includes("limit")) {
+        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla." });
+      }
+      return res.status(400).json({ error: msg });
+    }
+
+    return res.json({ ok: true, message: "OTP kod emailinizə göndərildi." });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// 2. Verify OTP and Reset Password
+app.post("/auth/reset-password", async (req, res) => {
+  try {
+    const { email, code, password } = req.body || {};
+    if (!email || !code || !password) return res.status(400).json({ error: "Missing fields" });
+
+    const cleanCode = String(code).replace(/\s+/g, "").trim();
+
+    // Verify OTP
+    const { data, error } = await supabaseAnon.auth.verifyOtp({
+      email,
+      token: cleanCode,
+      type: "email",
+    });
+
+    if (error) return res.status(400).json({ error: error.message || "Invalid OTP" });
+    if (!data?.user || !data?.session) return res.status(400).json({ error: "OTP verifying failed" });
+
+    const userId = data.user.id;
+
+    // Update Password
+    const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(userId, { password });
+    if (updErr) return res.status(400).json({ error: updErr.message });
+
+    // Return new session (auto-login)
+    const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email, password });
+
+    if (signinErr) return res.status(400).json({ error: "Password set but auto-login failed. Please login manually." });
+
+    const profile = await getProfile(userId);
+    await logEvent("auth_password_reset", userId, { email });
+
+    return res.json({
+      ok: true,
+      token: signin.session.access_token,
+      refreshToken: signin.session.refresh_token,
+      user: profileToUser(profile, signin.user),
+    });
+
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 // -------------------- Notifications (in-app inbox) --------------------
+
 app.get("/me/notifications", requireAuth, async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
