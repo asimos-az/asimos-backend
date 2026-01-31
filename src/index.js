@@ -78,6 +78,8 @@ const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 //   alter table public.profiles add column if not exists expo_push_token text;
 const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";// Static Super Admin (for React Admin Panel)
 // You can override these via env vars on Render.
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@asimos.local";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || "change_me_super_secret";
 const ADMIN_TOKEN_TTL_SEC = Number(process.env.ADMIN_TOKEN_TTL_SEC || 60 * 60 * 24 * 7); // 7 days
 
