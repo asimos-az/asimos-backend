@@ -1487,14 +1487,17 @@ app.post("/auth/forgot-password", async (req, res) => {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: "Email required" });
 
+    const cleanEmail = String(email).trim().toLowerCase();
+
     // Send OTP
     const { error } = await supabaseAnon.auth.signInWithOtp({
-      email,
+      email: cleanEmail,
       options: { shouldCreateUser: false },
     });
 
     if (error) {
       const msg = error.message || "Auth error";
+      console.error("Forgot Pass Error:", msg);
       const lower = msg.toLowerCase();
       if (lower.includes("rate") && lower.includes("limit")) {
         return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla." });
@@ -1514,17 +1517,25 @@ app.post("/auth/reset-password", async (req, res) => {
     const { email, code, password } = req.body || {};
     if (!email || !code || !password) return res.status(400).json({ error: "Missing fields" });
 
+    const cleanEmail = String(email).trim().toLowerCase();
     const cleanCode = String(code).replace(/\s+/g, "").trim();
 
-    // Verify OTP
+    console.log(`Reset attempt for: ${cleanEmail}, code len: ${cleanCode.length}`);
+
+    // Verify OTP (type: 'email' matches signInWithOtp)
     const { data, error } = await supabaseAnon.auth.verifyOtp({
-      email,
+      email: cleanEmail,
       token: cleanCode,
       type: "email",
     });
 
-    if (error) return res.status(400).json({ error: error.message || "Invalid OTP" });
-    if (!data?.user || !data?.session) return res.status(400).json({ error: "OTP verifying failed" });
+    if (error) {
+      console.error("Verify OTP Error:", error.message);
+      return res.status(400).json({ error: error.message || "Invalid OTP" });
+    }
+    if (!data?.user || !data?.session) {
+      return res.status(400).json({ error: "OTP verifying failed" });
+    }
 
     const userId = data.user.id;
 
@@ -1533,12 +1544,12 @@ app.post("/auth/reset-password", async (req, res) => {
     if (updErr) return res.status(400).json({ error: updErr.message });
 
     // Return new session (auto-login)
-    const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email, password });
+    const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email: cleanEmail, password });
 
-    if (signinErr) return res.status(400).json({ error: "Password set but auto-login failed. Please login manually." });
+    if (signinErr) return res.status(400).json({ error: "Şifrə dəyişdi, amma avto-giriş alınmadı. Zəhmət olmasa giriş edin." });
 
     const profile = await getProfile(userId);
-    await logEvent("auth_password_reset", userId, { email });
+    await logEvent("auth_password_reset", userId, { email: cleanEmail });
 
     return res.json({
       ok: true,
@@ -1548,6 +1559,7 @@ app.post("/auth/reset-password", async (req, res) => {
     });
 
   } catch (e) {
+    console.error("Reset Password Server Error:", e);
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
