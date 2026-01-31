@@ -1522,21 +1522,45 @@ app.post("/auth/reset-password", async (req, res) => {
 
     console.log(`Reset attempt for: ${cleanEmail}, code len: ${cleanCode.length}`);
 
-    // Verify OTP (type: 'email' matches signInWithOtp)
-    const { data, error } = await supabaseAnon.auth.verifyOtp({
+    // Verify OTP - Try multiple types to be robust
+    let verifyData = null;
+    let verifyError = null;
+
+    // 1. Try 'email' (Magic Link / Login code)
+    const { data: d1, error: e1 } = await supabaseAnon.auth.verifyOtp({
       email: cleanEmail,
       token: cleanCode,
       type: "email",
     });
+    if (!e1 && d1?.session) verifyData = d1;
+    else verifyError = e1;
 
-    if (error) {
-      console.error("Verify OTP Error:", error.message);
-      return res.status(400).json({ error: error.message || "Invalid OTP" });
-    }
-    if (!data?.user || !data?.session) {
-      return res.status(400).json({ error: "OTP verifying failed" });
+    // 2. Try 'recovery' (Reset Password code)
+    if (!verifyData) {
+      const { data: d2, error: e2 } = await supabaseAnon.auth.verifyOtp({
+        email: cleanEmail,
+        token: cleanCode,
+        type: "recovery",
+      });
+      if (!e2 && d2?.session) verifyData = d2;
     }
 
+    // 3. Try 'signup' (Unconfirmed user code)
+    if (!verifyData) {
+      const { data: d3, error: e3 } = await supabaseAnon.auth.verifyOtp({
+        email: cleanEmail,
+        token: cleanCode,
+        type: "signup",
+      });
+      if (!e3 && d3?.session) verifyData = d3;
+    }
+
+    if (!verifyData) {
+      console.error("Verify OTP Failed (all types):", verifyError?.message);
+      return res.status(400).json({ error: verifyError?.message || "Kod yanlışdır və ya müddəti bitib." });
+    }
+
+    const data = verifyData;
     const userId = data.user.id;
 
     // Update Password
