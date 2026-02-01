@@ -2585,3 +2585,70 @@ async function processNotificationQueue() {
   console.log(`[Queue] Processed ${processedIds.length} items. Sent ${sentCount} pushes.`);
   return { processed: processedIds.length, sent: sentCount };
 }
+
+// -------------------- Content Pages (Terms, etc.) --------------------
+
+// Public GET
+app.get("/content/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { data, error } = await supabaseAdmin
+      .from("content_pages")
+      .select("*")
+      .eq("slug", slug)
+      .maybeSingle(); // Don't error if missing, just return null or 404
+
+    if (!data) return res.status(404).json({ error: "Page not found" });
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin PUT
+app.put("/admin/content/:slug", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    // Simple Admin Token check (reusing existing admin logic if possible, or simple secret)
+    // The current admin panel uses a JWT. We should implement middleware or check it here.
+    // For now, assuming the admin panel sends the correct token which we verify.
+    // Since we don't have a global `requireAdmin` middleware exposed yet, I'll check manually using `verifyAdminToken` logic if it exists, or just check secret/token.
+
+    // Quick fix: user `req.headers.authorization` assuming Bearer token logic typically handled
+    // But since I don't want to break the pattern, I'll use a simple check or assume `requireAuth` if it supported admin role? 
+    // Actually, `requireAuth` checks DB profile roles. Admin panel usually uses a separate statically configured admin auth.
+    // Given `signAdminToken`, I should verify it.
+
+    // Let's implement a quick verification helper inline or use existing if any.
+    // Inspecting code: `ADMIN_JWT_SECRET` exists.
+
+    const token = authHeader.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "No token" });
+
+    // Verify JWT
+    const [headerB64, payloadB64, sigB64] = token.split(".");
+    if (!headerB64 || !payloadB64 || !sigB64) return res.status(401).json({ error: "Invalid token" });
+
+    const data = `${headerB64}.${payloadB64}`;
+    const expectedSig = crypto.createHmac("sha256", ADMIN_JWT_SECRET).update(data).digest("base64url");
+    if (sigB64 !== expectedSig) return res.status(403).json({ error: "Invalid signature" });
+
+    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+    if (payload.exp < Date.now() / 1000) return res.status(403).json({ error: "Token expired" });
+
+    // OK, Admin is valid.
+    const { slug } = req.params;
+    const { title, body } = req.body;
+
+    const { data: updated, error } = await supabaseAdmin
+      .from("content_pages")
+      .upsert({ slug, title, body, updated_at: new Date().toISOString() })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json(updated);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});

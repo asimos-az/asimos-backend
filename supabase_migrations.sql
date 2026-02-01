@@ -169,3 +169,16 @@ CREATE TABLE IF NOT EXISTS public.notification_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notification_queue_status ON public.notification_queue(status);
+
+-- CONTENT PAGES (Terms, Privacy, etc.)
+CREATE TABLE IF NOT EXISTS public.content_pages (
+    slug TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Seed Initial Content
+INSERT INTO public.content_pages (slug, title, body)
+VALUES ('terms', 'Qaydalar və Şərtlər', 'Məzmun tezliklə əlavə olunacaq...')
+ON CONFLICT (slug) DO NOTHING;
