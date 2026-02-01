@@ -154,3 +154,18 @@ CREATE TABLE IF NOT EXISTS public.job_alerts (
 
 -- Index for faster matching
 CREATE INDEX IF NOT EXISTS idx_job_alerts_user_id ON public.job_alerts(user_id);
+
+
+-- NOTIFICATION QUEUE (Scheduled Batch Notifications)
+-- Stores notifications to be sent at 08:00 and 19:00
+CREATE TABLE IF NOT EXISTS public.notification_queue (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    data JSONB,
+    status TEXT DEFAULT 'pending', -- pending, sent, failed
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_queue_status ON public.notification_queue(status);

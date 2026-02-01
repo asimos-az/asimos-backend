@@ -6,6 +6,7 @@ import crypto from "crypto";
 import nodemailer from "nodemailer";
 import path from "path";
 import { fileURLToPath } from "url";
+import cron from "node-cron";
 
 // ... existing imports ...
 
@@ -212,7 +213,7 @@ async function notifyNearbySeekers(job) {
     for (let offset = 0; offset < 20000; offset += PAGE) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, location, expo_push_token")
+        .select("id, full_name, location") // Removed expo_push_token check here, logic moves to queue processor but we need location
         .eq("role", "seeker")
         .range(offset, offset + PAGE - 1);
 
@@ -221,32 +222,12 @@ async function notifyNearbySeekers(job) {
         return { ok: false, reason: "profile_fetch_failed" };
       }
       if (!data || data.length === 0) break;
-
-      // Pull tokens from the dedicated push_tokens table (preferred)
-      const ids = data.map((x) => x.id).filter(Boolean);
-      let tokenMap = new Map();
-      if (ids.length) {
-        const { data: tData } = await supabaseAdmin
-          .from("push_tokens")
-          .select("user_id, expo_push_token")
-          .in("user_id", ids);
-        for (const t of tData || []) tokenMap.set(t.user_id, t.expo_push_token);
-      }
-
-      all.push(
-        ...data.map((p) => ({
-          ...p,
-          __push_token: tokenMap.get(p.id) || p.expo_push_token || null,
-        }))
-      );
+      all.push(...data);
       if (data.length < PAGE) break;
     }
 
-    const messages = [];
-    const notifRows = [];
+    const queueItems = [];
     for (const p of all) {
-      const token = p?.__push_token || p?.expo_push_token;
-      if (!token || typeof token !== "string") continue;
       const pl = p?.location || null;
       const plat = toNum(pl?.lat);
       const plng = toNum(pl?.lng);
@@ -255,31 +236,25 @@ async function notifyNearbySeekers(job) {
       const d = haversineDistanceM(lat, lng, plat, plng);
       if (d <= radiusM) {
         const title = "Yaxınlıqda iş var";
-        const body = job?.title ? `\"${job.title}\" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
+        const body = job?.title ? `"${job.title}" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
 
-        // Save to in-app inbox (best-effort)
-        notifRows.push({
+        // QUEUE IT
+        queueItems.push({
           user_id: p.id,
           title,
           body,
           data: { type: "job", jobId: job?.id || null },
-        });
-
-        messages.push({
-          to: token,
-          sound: "default",
-          title,
-          body,
-          data: { type: "job", jobId: job?.id || null },
+          status: 'pending'
         });
       }
     }
 
-    // Save notifications first (best-effort)
-    await insertNotifications(notifRows);
+    if (queueItems.length > 0) {
+      await supabaseAdmin.from("notification_queue").insert(queueItems);
+      console.log(`[Radius] Queued ${queueItems.length} notifications for Job ${job.id}`);
+    }
 
-    const res = await sendExpoPush(messages);
-    return { ok: true, candidates: all.length || 0, notified: messages.length, sent: res.sent };
+    return { ok: true, queued: queueItems.length };
   } catch (e) {
     console.warn("notifyNearbySeekers error", e);
     return { ok: false, reason: "exception" };
@@ -2446,7 +2421,7 @@ async function processJobAlerts(job) {
     const { data: alerts, error } = await supabaseAdmin.from("job_alerts").select("*");
     if (error || !alerts?.length) return;
 
-    const notifications = [];
+    const queueItems = [];
     const jobLat = job.location_lat;
     const jobLng = job.location_lng;
     const jobTxt = (job.title + " " + (job.description || "")).toLowerCase();
@@ -2459,9 +2434,7 @@ async function processJobAlerts(job) {
       if (alert.job_type && alert.job_type !== job.job_type) continue;
 
       // 2. Check Wage
-      // If alert has min_wage, job wage must be >= min_wage
       if (alert.min_wage && (job.wage || 0) < alert.min_wage) continue;
-      // If alert has max_wage, job wage must be <= max_wage (rare case, usually users want min)
       if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
 
       // 3. Check Query
@@ -2475,18 +2448,20 @@ async function processJobAlerts(job) {
         if (dist > alert.radius_m) continue;
       }
 
-      // Match found
-      notifications.push({
+      // Match found -> ADD TO QUEUE
+      queueItems.push({
         user_id: alert.user_id,
         title: "Yeni İş Elanı: " + job.title,
         body: `Axtarışınıza uyğun yeni elan: ${job.wage ? job.wage + " AZN" : "Maaş razılaşma ilə"}`,
-        data: { type: "job", id: job.id }, // Navigate to job details
+        data: { type: "job", id: job.id },
+        status: 'pending'
       });
     }
 
-    if (notifications.length > 0) {
-      await supabaseAdmin.from("notifications").insert(notifications);
-      console.log(`[JobAlerts] Created ${notifications.length} notifications for Job ${job.id}`);
+    if (queueItems.length > 0) {
+      // Insert into QUEUE, not directly to notifications/push
+      await supabaseAdmin.from("notification_queue").insert(queueItems);
+      console.log(`[JobAlerts] Queued ${queueItems.length} notifications for Job ${job.id}`);
     }
   } catch (e) {
     console.error("[JobAlerts] Error:", e);
@@ -2495,4 +2470,118 @@ async function processJobAlerts(job) {
 
 app.listen(PORT, () => {
   console.log(`Asimos backend running on :${PORT}`);
+  console.log("Scheduled Notification System (08:00 & 19:00) initialized.");
 });
+
+
+// -------------------- Cron Schedule --------------------
+// Runs at 08:00 and 19:00 every day
+// "0 8,19 * * *"
+cron.schedule("0 8,19 * * *", () => {
+  console.log(`[Cron] Running Scheduled Notification Job at ${new Date().toISOString()}`);
+  processNotificationQueue().catch(e => console.error("[Cron] Error:", e));
+});
+
+// Manual Trigger for Testing/Admin
+app.post("/admin/trigger-notifications", async (req, res) => {
+  const { secret } = req.body;
+  if (secret !== ADMIN_JWT_SECRET) return res.status(403).json({ error: "Forbidden" });
+
+  processNotificationQueue()
+    .then(r => res.json(r))
+    .catch(e => res.status(500).json({ error: e.message }));
+});
+
+async function processNotificationQueue() {
+  const BATCH_SIZE = 500; // Process 500 at a time to avoid memory issues
+
+  // 1. Fetch pending notifications
+  const { data: queue, error } = await supabaseAdmin
+    .from("notification_queue")
+    .select("*")
+    .eq("status", "pending")
+    .limit(BATCH_SIZE);
+
+  if (error) {
+    console.error("[Queue] Fetch error:", error);
+    return { error: error.message };
+  }
+  if (!queue || queue.length === 0) {
+    console.log("[Queue] No pending notifications.");
+    return { processed: 0 };
+  }
+
+  // 2. Fetch User Tokens for these items
+  const userIds = [...new Set(queue.map(q => q.user_id))];
+  const { data: tokens } = await supabaseAdmin
+    .from("push_tokens")
+    .select("user_id, expo_push_token")
+    .in("user_id", userIds);
+
+  // Also fetch from profiles as backup
+  const { data: profiles } = await supabaseAdmin
+    .from("profiles")
+    .select("id, expo_push_token")
+    .in("id", userIds);
+
+  const tokenMap = new Map();
+  // Prefer push_tokens table
+  tokens?.forEach(t => tokenMap.set(t.user_id, t.expo_push_token));
+  // Fallback to profiles table
+  profiles?.forEach(p => {
+    if (!tokenMap.has(p.id) && p.expo_push_token) {
+      tokenMap.set(p.id, p.expo_push_token);
+    }
+  });
+
+  const messages = [];
+  const historyRows = [];
+  const processedIds = [];
+
+  for (const item of queue) {
+    const token = tokenMap.get(item.user_id);
+
+    // Add to in-app history even if no token (user might see it in app)
+    historyRows.push({
+      user_id: item.user_id,
+      title: item.title,
+      body: item.body,
+      data: item.data,
+      created_at: new Date().toISOString() // Show as "new" now
+    });
+
+    if (token) {
+      messages.push({
+        to: token,
+        sound: "default",
+        title: item.title,
+        body: item.body,
+        data: item.data
+      });
+    }
+    processedIds.push(item.id);
+  }
+
+  // 3. Insert into in-app notifications
+  if (historyRows.length > 0) {
+    await insertNotifications(historyRows);
+  }
+
+  // 4. Send Push
+  let sentCount = 0;
+  if (messages.length > 0) {
+    const res = await sendExpoPush(messages);
+    sentCount = res.sent || 0;
+  }
+
+  // 5. Update Queue Status
+  if (processedIds.length > 0) {
+    await supabaseAdmin
+      .from("notification_queue")
+      .update({ status: "sent" })
+      .in("id", processedIds);
+  }
+
+  console.log(`[Queue] Processed ${processedIds.length} items. Sent ${sentCount} pushes.`);
+  return { processed: processedIds.length, sent: sentCount };
+}
