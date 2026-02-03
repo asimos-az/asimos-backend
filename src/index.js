@@ -207,13 +207,13 @@ async function notifyNearbySeekers(job) {
     const radiusM = toNum(job?.notifyRadiusM) ?? 500;
     if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
 
-    // Fetch seekers in pages (covers large user counts)
+    // Fetch seekers in pages
     const all = [];
     const PAGE = 1000;
     for (let offset = 0; offset < 20000; offset += PAGE) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, location") // Removed expo_push_token check here, logic moves to queue processor but we need location
+        .select("id, full_name, location, expo_push_token") // Need push token now
         .eq("role", "seeker")
         .range(offset, offset + PAGE - 1);
 
@@ -226,7 +226,9 @@ async function notifyNearbySeekers(job) {
       if (data.length < PAGE) break;
     }
 
-    const queueItems = [];
+    const pushMessages = [];
+    const historyRows = [];
+
     for (const p of all) {
       const pl = p?.location || null;
       const plat = toNum(pl?.lat);
@@ -237,24 +239,42 @@ async function notifyNearbySeekers(job) {
       if (d <= radiusM) {
         const title = "Yaxınlıqda iş var";
         const body = job?.title ? `"${job.title}" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
+        const dataPayload = { type: "job", jobId: job?.id || null };
 
-        // QUEUE IT
-        queueItems.push({
+        // 1. Prepare Push
+        if (p.expo_push_token && String(p.expo_push_token).startsWith("ExponentPushToken")) {
+          pushMessages.push({
+            to: p.expo_push_token,
+            title,
+            body,
+            data: dataPayload,
+            sound: "default"
+          });
+        }
+
+        // 2. Prepare History
+        historyRows.push({
           user_id: p.id,
           title,
           body,
-          data: { type: "job", jobId: job?.id || null },
-          status: 'pending'
+          data: dataPayload,
+          is_read: false
         });
       }
     }
 
-    if (queueItems.length > 0) {
-      await supabaseAdmin.from("notification_queue").insert(queueItems);
-      console.log(`[Radius] Queued ${queueItems.length} notifications for Job ${job.id}`);
+    // SEND IMMEDIATELY
+    if (pushMessages.length > 0) {
+      console.log(`[Radius] Sending ${pushMessages.length} instant pushes...`);
+      sendExpoPush(pushMessages).catch(e => console.error("Push failed", e));
     }
 
-    return { ok: true, queued: queueItems.length };
+    // SAVE HISTORY
+    if (historyRows.length > 0) {
+      await insertNotifications(historyRows);
+    }
+
+    return { ok: true, sent: pushMessages.length, stored: historyRows.length };
   } catch (e) {
     console.warn("notifyNearbySeekers error", e);
     return { ok: false, reason: "exception" };
