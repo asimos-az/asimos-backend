@@ -221,11 +221,11 @@ async function insertNotifications(rows) {
 
 async function notifyNearbySeekers(job) {
   try {
-    const lat = toNum(job?.location?.lat);
-    const lng = toNum(job?.location?.lng);
+    const lat = toNum(job?.location_lat ?? job?.location?.lat);
+    const lng = toNum(job?.location_lng ?? job?.location?.lng);
     if (lat === null || lng === null) return { ok: false, reason: "no_job_location" };
 
-    const radiusM = toNum(job?.notifyRadiusM) ?? 500;
+    const radiusM = toNum(job?.notify_radius_m ?? job?.notifyRadiusM) ?? 500;
     if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
 
     // Fetch seekers in pages
