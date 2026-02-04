@@ -213,7 +213,7 @@ async function notifyNearbySeekers(job) {
     for (let offset = 0; offset < 20000; offset += PAGE) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, location, expo_push_token") // Need push token now
+        .select("id, full_name, location")
         .eq("role", "seeker")
         .range(offset, offset + PAGE - 1);
 
@@ -224,6 +224,26 @@ async function notifyNearbySeekers(job) {
       if (!data || data.length === 0) break;
       all.push(...data);
       if (data.length < PAGE) break;
+    }
+
+    // Fetch tokens separately from dedicated table (more reliable)
+    const userIds = all.map(p => p.id);
+    const tokenMap = new Map();
+    if (userIds.length > 0) {
+      // Chunk ID list to avoid URL too long
+      const chunkedIds = chunk(userIds, 500);
+      for (const batchIds of chunkedIds) {
+        const { data: tokens } = await supabaseAdmin
+          .from("push_tokens")
+          .select("user_id, expo_push_token")
+          .in("user_id", batchIds);
+
+        if (tokens) {
+          for (const t of tokens) {
+            if (t.expo_push_token) tokenMap.set(t.user_id, t.expo_push_token);
+          }
+        }
+      }
     }
 
     const pushMessages = [];
@@ -241,14 +261,19 @@ async function notifyNearbySeekers(job) {
         const body = job?.title ? `"${job.title}" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
         const dataPayload = { type: "job", jobId: job?.id || null };
 
+        // Get token from dedicated table OR profile fallback
+        // NOTE: Profile fallback removed from query but we rely on tokenMap
+        const userToken = tokenMap.get(p.id);
+
         // 1. Prepare Push
-        if (p.expo_push_token && String(p.expo_push_token).startsWith("ExponentPushToken")) {
+        if (userToken && String(userToken).startsWith("ExponentPushToken")) {
           pushMessages.push({
-            to: p.expo_push_token,
+            to: userToken,
             title,
             body,
             data: dataPayload,
-            sound: "default"
+            sound: "default",
+            priority: "high"
           });
         }
 
