@@ -343,7 +343,8 @@ async function notifyNearbySeekers(job) {
             body,
             data: dataPayload,
             sound: "default",
-            priority: "high"
+            priority: "high",
+            channelId: "default"
           });
         }
 
