@@ -252,8 +252,7 @@ async function notifyNearbySeekers(job) {
         user_id: job.createdBy,
         title: "Debug Start",
         body: `Proses başladı. Ümumi istifadəçi: ${all.length}. Job Loc: ${lat}, ${lng}`,
-        data: { type: "debug" },
-        is_read: false
+        data: { type: "debug" }
       }]);
     }
 
@@ -319,8 +318,7 @@ async function notifyNearbySeekers(job) {
           user_id: p.id,
           title,
           body,
-          data: dataPayload,
-          is_read: false
+          data: dataPayload
         });
       }
     }
@@ -359,8 +357,7 @@ async function notifyNearbySeekers(job) {
         user_id: job.createdBy,
         title: "Debug End",
         body: `Bitdi. Uyğun gələn: ${matchCount}, Push göndərildi: ${pushMessages.length}`,
-        data: { type: "debug" },
-        is_read: false
+        data: { type: "debug" }
       }]);
     }
 
