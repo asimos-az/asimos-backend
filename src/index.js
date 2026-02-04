@@ -217,9 +217,14 @@ async function sendExpoPush(messages) {
       }
     }
 
+    if (data?.data) {
+      const errs = data.data.filter(x => x.status === "error");
+      if (errs.length > 0) paramErrors.push(...errs);
+    }
+
     sent += batch.length;
   }
-  return { ok: true, sent };
+  return { ok: true, sent, errors: paramErrors };
 }
 
 async function insertNotifications(rows) {
@@ -1418,7 +1423,9 @@ app.post("/auth/refresh", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
-    await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
+    // Fix: 'email' and 'finalRole' were undefined here.
+    const userEmail = data.user?.email;
+    await logEvent("auth_refreshed", userId, { email: userEmail, role: profile?.role });
 
     return res.json({
       token: accessToken,
