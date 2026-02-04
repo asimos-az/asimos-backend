@@ -213,7 +213,7 @@ async function notifyNearbySeekers(job) {
     for (let offset = 0; offset < 20000; offset += PAGE) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, location")
+        .select("id, full_name, location, expo_push_token")
         .eq("role", "seeker")
         .range(offset, offset + PAGE - 1);
 
@@ -226,7 +226,7 @@ async function notifyNearbySeekers(job) {
       if (data.length < PAGE) break;
     }
 
-    // Fetch tokens separately from dedicated table (more reliable)
+    // Fetch tokens separately from dedicated table
     const userIds = all.map(p => p.id);
     const tokenMap = new Map();
     if (userIds.length > 0) {
@@ -248,6 +248,9 @@ async function notifyNearbySeekers(job) {
 
     const pushMessages = [];
     const historyRows = [];
+    let matchCount = 0;
+
+    console.log(`[Notify] Checking ${all.length} seekers for Job ${job?.id} at (${lat}, ${lng}) radius=${radiusM}m`);
 
     for (const p of all) {
       const pl = p?.location || null;
@@ -257,13 +260,13 @@ async function notifyNearbySeekers(job) {
 
       const d = haversineDistanceM(lat, lng, plat, plng);
       if (d <= radiusM) {
+        matchCount++;
         const title = "Yaxınlıqda iş var";
         const body = job?.title ? `"${job.title}" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
         const dataPayload = { type: "job", jobId: job?.id || null };
 
-        // Get token from dedicated table OR profile fallback
-        // NOTE: Profile fallback removed from query but we rely on tokenMap
-        const userToken = tokenMap.get(p.id);
+        // Priority: 1) push_tokens table, 2) profiles table
+        const userToken = tokenMap.get(p.id) || p.expo_push_token;
 
         // 1. Prepare Push
         if (userToken && String(userToken).startsWith("ExponentPushToken")) {
@@ -275,6 +278,8 @@ async function notifyNearbySeekers(job) {
             sound: "default",
             priority: "high"
           });
+        } else {
+          console.log(`[Notify] Seeker ${p.id} matches (dist=${Math.round(d)}m) but NO TOKEN`);
         }
 
         // 2. Prepare History
@@ -288,9 +293,10 @@ async function notifyNearbySeekers(job) {
       }
     }
 
+    console.log(`[Notify] Matched ${matchCount} seekers, sending ${pushMessages.length} pushes.`);
+
     // SEND IMMEDIATELY
     if (pushMessages.length > 0) {
-      console.log(`[Radius] Sending ${pushMessages.length} instant pushes...`);
       sendExpoPush(pushMessages).catch(e => console.error("Push failed", e));
     }
 
