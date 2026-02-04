@@ -8,9 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import cron from "node-cron";
 
-// ... existing imports ...
 
-// SMTP Configuration (for approval emails)
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = process.env.SMTP_PORT || 587;
 const SMTP_USER = process.env.SMTP_USER;
@@ -29,7 +27,6 @@ const mailer = nodemailer.createTransport({
 
 async function sendApprovalEmail(toEmail, fullName) {
   if (!SMTP_HOST || !SMTP_USER) {
-    console.warn("SMTP not configured, skipping approval email to:", toEmail);
     return;
   }
   try {
@@ -40,9 +37,7 @@ async function sendApprovalEmail(toEmail, fullName) {
       text: `Salam ${fullName},\n\nHesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.\n\nHörmətlə,\nAsimos Komandası`,
       html: `<p>Salam <b>${fullName}</b>,</p><p>Hesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.</p><p>Hörmətlə,<br>Asimos Komandası</p>`,
     });
-    console.log("Approval email sent to:", toEmail);
   } catch (e) {
-    console.error("Failed to send approval email:", e);
   }
 }
 
@@ -50,8 +45,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Serve static assets from /public (e.g. /logo.png)
-// Put your logo at: <project_root>/public/logo.png
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -63,7 +56,6 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn("Missing Supabase env vars. Please set SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY");
 }
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -73,12 +65,7 @@ const supabaseAnon = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-// Expo push notifications (optional)
-// NOTE: To fully enable push, add `expo_push_token` TEXT column to `profiles` table.
-// Example SQL:
-//   alter table public.profiles add column if not exists expo_push_token text;
 const EXPO_PUSH_ENDPOINT = "https://exp.host/--/api/v2/push/send";// Static Super Admin (for React Admin Panel)
-// You can override these via env vars on Render.
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@asimos.local";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || "change_me_super_secret";
@@ -128,14 +115,12 @@ function requireAdmin(req, res, next) {
 
 async function logEvent(type, actorId, metadata) {
   try {
-    // events table must exist (see supabase_migrations.sql)
     await supabaseAdmin.from("events").insert({
       type,
       actor_id: actorId || null,
       metadata: metadata || null,
     });
   } catch {
-    // ignore if table doesn't exist or insert fails
   }
 }
 
@@ -169,7 +154,6 @@ function chunk(arr, size) {
 async function sendExpoPush(messages) {
   if (!messages?.length) return { ok: true, sent: 0 };
 
-  // Expo recommends max 100 messages per request
   const batches = chunk(messages, 100);
   let sent = 0;
   let paramErrors = [];
@@ -186,9 +170,7 @@ async function sendExpoPush(messages) {
 
     const data = await r.json().catch(() => null);
 
-    // DEBUG: Log generic error
     if (!r.ok) {
-      console.warn("Expo push send failed", r.status, data);
       await insertNotifications([{
         user_id: batch[0].data?.jobId ? messages[0].data.jobId : null, // Try to find a target if possible, otherwise skip
         title: "Expo Error",
@@ -198,22 +180,11 @@ async function sendExpoPush(messages) {
       continue;
     }
 
-    // DEBUG: Log success details
     if (data?.data) {
-      // Just grab the first result to show to user
       const firstRes = data.data[0];
-      // We need a user_id to show this debug log to. 
-      // We can extract it from the map if we passed it, but here we don't have it easily.
-      // However, we know this function is called from notifyNearbySeekers where we logged start/end.
-      // Let's just rely on console logs for now, OR valid notifications.
-      // Actually, let's try to notify the admin/creator if we can pass that info down.
 
-      // BETTER: We can inspect 'details' field in response for errors like 'DeviceNotRegistered'
       const errorDetails = data.data.filter(x => x.status === "error");
       if (errorDetails.length > 0) {
-        console.warn("Expo Partial Errors:", errorDetails);
-        // We can't easily notify the user here without knowing WHO the creator was.
-        // BUT, notifyNearbySeekers calls this.
       }
     }
 
@@ -230,25 +201,21 @@ async function sendExpoPush(messages) {
 async function insertNotifications(rows) {
   if (!rows?.length) return { ok: true, inserted: 0 };
   try {
-    // Chunk to avoid payload limits
     const batches = chunk(rows, 500);
     let inserted = 0;
     for (const b of batches) {
       const { error } = await supabaseAdmin.from("notifications").insert(b);
       if (error) {
         const msg = String(error.message || "");
-        // If table doesn't exist yet, don't break notification flow.
         if (/Could not find the table|schema cache|does not exist/i.test(msg)) {
           return { ok: false, warning: "notifications table missing" };
         }
-        console.warn("insertNotifications failed", msg);
         continue;
       }
       inserted += b.length;
     }
     return { ok: true, inserted };
   } catch (e) {
-    console.warn("insertNotifications exception", e?.message || e);
     return { ok: false };
   }
 }
@@ -262,7 +229,6 @@ async function notifyNearbySeekers(job) {
     const radiusM = toNum(job?.notify_radius_m ?? job?.notifyRadiusM) ?? 500;
     if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
 
-    // Fetch seekers in pages (REMOVED ROLE FILTER to debug)
     const all = [];
     const PAGE = 1000;
     for (let offset = 0; offset < 20000; offset += PAGE) {
@@ -272,7 +238,6 @@ async function notifyNearbySeekers(job) {
         .range(offset, offset + PAGE - 1);
 
       if (error) {
-        console.warn("notifyNearbySeekers: profile fetch failed", error.message);
         return { ok: false, reason: "profile_fetch_failed" };
       }
       if (!data || data.length === 0) break;
@@ -280,7 +245,6 @@ async function notifyNearbySeekers(job) {
       if (data.length < PAGE) break;
     }
 
-    // DEBUG: Inform creator that process started
     if (job?.createdBy) {
       await insertNotifications([{
         user_id: job.createdBy,
@@ -290,11 +254,9 @@ async function notifyNearbySeekers(job) {
       }]);
     }
 
-    // Fetch tokens separately from dedicated table
     const userIds = all.map(p => p.id);
     const tokenMap = new Map();
     if (userIds.length > 0) {
-      // Chunk ID list to avoid URL too long
       const chunkedIds = chunk(userIds, 500);
       for (const batchIds of chunkedIds) {
         const { data: tokens } = await supabaseAdmin
@@ -314,10 +276,8 @@ async function notifyNearbySeekers(job) {
     const historyRows = [];
     let matchCount = 0;
 
-    console.log(`[Notify] Checking ${all.length} seekers for Job ${job?.id} at (${lat}, ${lng}) radius=${radiusM}m`);
 
     for (const p of all) {
-      // Don't notify the creator about their own job
       if (p.id === job.createdBy) continue;
 
       const pl = p?.location || null;
@@ -332,10 +292,8 @@ async function notifyNearbySeekers(job) {
         const body = job?.title ? `"${job.title}" üçün vakansiya var.` : "Sənin yaxınlığında yeni vakansiya var.";
         const dataPayload = { type: "job", jobId: job?.id || null };
 
-        // Priority: 1) push_tokens table, 2) profiles table
         const userToken = tokenMap.get(p.id) || p.expo_push_token;
 
-        // 1. Prepare Push
         if (userToken && String(userToken).startsWith("ExponentPushToken")) {
           pushMessages.push({
             to: userToken,
@@ -348,7 +306,6 @@ async function notifyNearbySeekers(job) {
           });
         }
 
-        // 2. Prepare History
         historyRows.push({
           user_id: p.id,
           title,
@@ -358,9 +315,7 @@ async function notifyNearbySeekers(job) {
       }
     }
 
-    console.log(`[Notify] Matched ${matchCount} seekers, sending ${pushMessages.length} pushes.`);
 
-    // DEBUG: If 0 matches, notify the Creator so they know the system worked but found nobody.
     if (matchCount === 0 && job.createdBy) {
       const creatorToken = tokenMap.get(job.createdBy) ||
         (all.find(x => x.id === job.createdBy)?.expo_push_token);
@@ -376,17 +331,13 @@ async function notifyNearbySeekers(job) {
       }
     }
 
-    // SEND IMMEDIATELY
     if (pushMessages.length > 0) {
-      sendExpoPush(pushMessages).catch(e => console.error("Push failed", e));
     }
 
-    // SAVE HISTORY
     if (historyRows.length > 0) {
       await insertNotifications(historyRows);
     }
 
-    // DEBUG: Inform creator of final result
     if (job?.createdBy) {
       await insertNotifications([{
         user_id: job.createdBy,
@@ -398,12 +349,83 @@ async function notifyNearbySeekers(job) {
 
     return { ok: true, sent: pushMessages.length, stored: historyRows.length };
   } catch (e) {
-    console.warn("notifyNearbySeekers error", e);
     return { ok: false, reason: "exception" };
   }
 }
 
 
+
+
+async function notifyNearbyEmployers(alert, seekerName) {
+  try {
+    const lat = toNum(alert?.location_lat);
+    const lng = toNum(alert?.location_lng);
+    const radiusM = toNum(alert?.radius_m) || 10000;
+    const category = alert?.category;
+
+    if (lat === null || lng === null) return { ok: false, reason: "no_alert_location" };
+    if (!category) return { ok: false, reason: "no_category" };
+
+    // Find employers with matching category
+    // Note: We use ilike for flexible matching. Real prod might use exact slug match.
+    const { data: employers, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, full_name, location, expo_push_token, company_name")
+      .eq("role", "employer")
+      .ilike("category", `%${category}%`);
+
+    if (error || !employers || employers.length === 0) return { ok: true, matched: 0 };
+
+    const pushMessages = [];
+    const historyRows = [];
+    let matchCount = 0;
+
+    for (const emp of employers) {
+      const plat = toNum(emp.location?.lat);
+      const plng = toNum(emp.location?.lng);
+      if (plat === null || plng === null) continue;
+
+      const d = haversineDistanceM(lat, lng, plat, plng);
+      if (d <= radiusM) {
+        matchCount++;
+        const title = "Yeni işçi axtarışı";
+        const body = `Yaxınlıqda (${Math.round(d)}m) ${seekerName || "bir nəfər"} ${category} sahəsi üzrə iş axtarır.`;
+        const dataPayload = { type: "alert_match", alertId: alert.id };
+
+        const userToken = emp.expo_push_token;
+
+        if (userToken && String(userToken).startsWith("ExponentPushToken")) {
+          pushMessages.push({
+            to: userToken,
+            title,
+            body,
+            data: dataPayload,
+            sound: "default",
+            priority: "high"
+          });
+        }
+        historyRows.push({
+          user_id: emp.id,
+          title,
+          body,
+          data: dataPayload
+        });
+      }
+    }
+
+    if (pushMessages.length > 0) {
+      sendExpoPush(pushMessages).catch(console.error);
+    }
+    if (historyRows.length > 0) {
+      await insertNotifications(historyRows);
+    }
+
+    return { ok: true, matched: matchCount };
+  } catch (e) {
+    console.warn("notifyNearbyEmployers error", e);
+    return { ok: false };
+  }
+}
 
 function isValidLatLng(lat, lng) {
   return (
@@ -421,7 +443,6 @@ function isValidLatLng(lat, lng) {
 
 
 function bbox(lat, lng, radiusM) {
-  // Approx bounding box
   const latDelta = radiusM / 111320;
   const lngDelta = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
   return {
@@ -465,15 +486,12 @@ function computeExpiresAt(jobType, durationDays) {
 async function cleanupExpiredJobs() {
   try {
     const nowIso = new Date().toISOString();
-    // Delete jobs with explicit expiry
     await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso);
 
-    // Backward-compat: if expires_at is missing, treat permanent jobs as 28-day TTL
     const cutoffIso = new Date(Date.now() - 28 * MS_DAY).toISOString();
     await supabaseAdmin.from("jobs").delete().is("expires_at", null).eq("is_daily", false).lte("created_at", cutoffIso);
     await supabaseAdmin.from("jobs").delete().is("expires_at", null).is("is_daily", null).lte("created_at", cutoffIso);
   } catch {
-    // ignore (e.g., column doesn't exist yet)
   }
 }
 
@@ -507,7 +525,6 @@ async function requireAuth(req, res, next) {
     const token = header.startsWith("Bearer ") ? header.slice(7) : null;
     if (!token) return res.status(401).json({ error: "Unauthorized" });
 
-    // Validate token and get user
     const { data, error } = await supabaseAnon.auth.getUser(token);
     if (error || !data?.user) return res.status(401).json({ error: "Invalid token" });
 
@@ -519,8 +536,6 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// Optional auth: attach req.authUser if a valid bearer token is present,
-// but never block the request. This enables guest browsing.
 async function optionalAuth(req, res, next) {
   try {
     const header = req.headers.authorization || "";
@@ -547,7 +562,6 @@ async function optionalAuth(req, res, next) {
 }
 
 app.get("/health", (req, res) => res.json({ ok: true }));
-// -------------------- Admin API --------------------
 app.post("/admin/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -582,8 +596,6 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
     const { count: employersTotal } = await supabaseAdmin.from("profiles").select("*", { count: "exact", head: true }).eq("role", "employer");
     const { count: jobsTotal } = await supabaseAdmin.from("jobs").select("*", { count: "exact", head: true });
 
-    // Events are optional until you run supabase_migrations.sql.
-    // If the table doesn't exist yet, we still return dashboard counts.
     const evRes = await supabaseAdmin
       .from("events")
       .select("*")
@@ -607,7 +619,6 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
   }
 });
 
-// Users (profiles)
 app.get("/admin/users", requireAdmin, async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
@@ -615,8 +626,6 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
 
-    // NOTE: Some projects don't have profiles.updated_at (or even created_at).
-    // Don't hard-depend on those columns; try a safe ordering and gracefully fall back.
     const buildBaseQuery = () => {
       let query = supabaseAdmin
         .from("profiles")
@@ -631,7 +640,6 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
       return query;
     };
 
-    // Try ordering by created_at first (common), otherwise no order.
     let { data, error } = await buildBaseQuery().order("created_at", { ascending: false });
     if (error && /does not exist/i.test(error.message || "")) {
       ({ data, error } = await buildBaseQuery());
@@ -667,7 +675,6 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Invalid status" });
     }
 
-    // Check previous state for email trigger
     let shouldSendEmail = false;
     if (allowed.status === "active") {
       const { data: oldProfile } = await supabaseAdmin.from("profiles").select("status").eq("id", id).single();
@@ -680,11 +687,8 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
 
     if (shouldSendEmail) {
-      // Need email address from Auth user
       const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id);
       if (authUser?.user?.email) {
-        // Run in background
-        sendApprovalEmail(authUser.user.email, data.full_name || "İstifadəçi").catch(console.error);
       }
     }
 
@@ -709,7 +713,6 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// Jobs
 app.get("/admin/jobs", requireAdmin, async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
@@ -735,8 +738,6 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
   }
 });
 
-// Admin can create jobs from panel (same fields as mobile employer create)
-// Required: created_by (employer user id), title
 app.post("/admin/jobs", requireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
@@ -746,7 +747,6 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     if (!title) return res.status(400).json({ error: "Title is required" });
     if (!created_by) return res.status(400).json({ error: "created_by (employer user id) is required" });
 
-    // Validate employer exists
     const { data: emp, error: empErr } = await supabaseAdmin
       .from("profiles")
       .select("id, role, average_rating")
@@ -768,7 +768,6 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       ? Number(body.location_lng)
       : null;
 
-    // Location is required so seekers can see this job in radius-based listings.
     if (!Number.isFinite(location_lat) || !Number.isFinite(location_lng)) {
       return res.status(400).json({ error: "Lokasiya seçilməlidir (xəritədən seçin)" });
     }
@@ -796,15 +795,12 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       status: body.status ? String(body.status) : "open",
     };
 
-    // Check for Premium Boosting (Rating >= 4.8)
     if (emp.average_rating && emp.average_rating >= 4.8) {
       const boostDate = new Date();
       boostDate.setDate(boostDate.getDate() + 7); // +1 week
       insertRow.boosted_until = boostDate.toISOString();
     }
 
-    // Some older DB schemas may not have the `status` column yet.
-    // If insert fails specifically due to missing column, retry without status (best-effort).
     let insertRes = await supabaseAdmin.from("jobs").insert(insertRow).select("*").single();
     if (insertRes.error && /\bstatus\b/i.test(insertRes.error.message || "")) {
       const { status, ...withoutStatus } = insertRow;
@@ -813,7 +809,6 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     const { data, error } = insertRes;
     if (error) return res.status(400).json({ error: error.message });
 
-    // Trigger seeker notifications (best-effort)
     try {
       const jobForNotify = {
         id: data.id,
@@ -880,7 +875,6 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
 });
 
 
-// Categories (with sub-categories via parent_id)
 app.get("/admin/categories", requireAdmin, async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
@@ -925,7 +919,6 @@ app.post("/admin/categories", requireAdmin, async (req, res) => {
     const finalSlug = String(slug || "").trim() ? String(slug).trim() : slugify(name);
     if (!finalSlug) return res.status(400).json({ error: "Slug is required" });
 
-    // Optional: validate parent exists
     if (parent_id) {
       const { data: parent, error: pErr } = await supabaseAdmin.from("categories").select("id").eq("id", parent_id).maybeSingle();
       if (pErr) return res.status(400).json({ error: pErr.message });
@@ -988,7 +981,6 @@ app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
 
-    // Prevent deleting a parent that still has children (so admin doesn't accidentally break structure)
     const { count: childrenCount, error: cErr } = await supabaseAdmin
       .from("categories")
       .select("*", { count: "exact", head: true })
@@ -1009,7 +1001,6 @@ app.delete("/admin/categories/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// Public categories (for mobile selects)
 app.get("/categories", async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -1028,7 +1019,6 @@ app.get("/categories", async (req, res) => {
       return res.status(400).json({ error: msg });
     }
 
-    // Nest them: parents -> children
     const byId = new Map();
     const parents = [];
     for (const c of data || []) byId.set(c.id, { ...c, children: [] });
@@ -1042,7 +1032,6 @@ app.get("/categories", async (req, res) => {
   }
 });
 
-// Events
 app.get("/admin/events", requireAdmin, async (req, res) => {
   try {
     const type = (req.query.type || "").toString().trim();
@@ -1062,7 +1051,6 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
     const { data, error } = await query;
     if (error) {
       const msg = (error.message || "").toString();
-      // If events table isn't created yet, don't hard-fail.
       if (/Could not find the table|schema cache/i.test(msg)) {
         return res.json({
           items: [],
@@ -1080,9 +1068,7 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
-// -------------------- /Admin API --------------------
 
-// Register -> sends EMAIL OTP code via Supabase Auth (password is set after OTP verification)
 app.post("/auth/register", async (req, res) => {
   try {
     const {
@@ -1093,6 +1079,7 @@ app.post("/auth/register", async (req, res) => {
       password,
       phone,
       location,
+      category,
     } = req.body || {};
 
     if (!email || !password || !fullName || !role) {
@@ -1102,10 +1089,6 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    // EMAIL OTP (6 rəqəmli kod) göndər.
-    // Qeyd: `signInWithOtp` default olaraq Magic Link email template-ni istifadə edir.
-    // 6 rəqəmli OTP görmək üçün Supabase Dashboard > Auth > Email Templates > Magic Link
-    // template-inə `{{ .Token }}` əlavə edilməlidir.
     const { data, error } = await supabaseAnon.auth.signInWithOtp({
       email,
       options: {
@@ -1129,7 +1112,6 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({ error: msg });
     }
 
-    // Best-effort: persist role/profile early (fixes cases where OTP metadata is not saved)
     const otpUserId = data?.user?.id;
     if (otpUserId) {
       try {
@@ -1142,6 +1124,7 @@ app.post("/auth/register", async (req, res) => {
             companyName: role === "employer" ? (companyName || null) : null,
             phone: phone || null,
             location: location || null,
+            category: role === "employer" ? (category || null) : null,
           },
         });
       } catch { }
@@ -1154,13 +1137,13 @@ app.post("/auth/register", async (req, res) => {
           company_name: role === "employer" ? (companyName || null) : null,
           phone: phone || null,
           location: location || null,
+          category: role === "employer" ? (category || null) : null,
         });
       } catch { }
     }
 
     await logEvent("auth_register_request", otpUserId || null, { email, role, hasCompanyName: !!companyName });
 
-    // OTP axınında session adətən NULL olur.
     return res.json({
       ok: true,
       needsOtp: true,
@@ -1177,15 +1160,12 @@ app.post("/auth/register", async (req, res) => {
 
 
 
-// Geocode proxy (Nominatim) — Azerbaijan focused
 app.get("/geo/search", async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
     if (!q) return res.status(400).json({ error: "q is required" });
 
-    // Azerbaijan bounding box (approx)
     const viewbox = "44.0,42.0,51.0,38.0";
-    // We remove bounded=1 to avoid strict filtering if the point is slightly outside
     const url =
       "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5" +
       "&addressdetails=1&accept-language=az&countrycodes=az" +
@@ -1195,7 +1175,6 @@ app.get("/geo/search", async (req, res) => {
     const r = await fetch(url, {
       headers: {
         "Accept": "application/json",
-        // Identify the app with contact info
         "User-Agent": "AsimosApp/1.0 (info@asimos.az)",
       },
     });
@@ -1206,7 +1185,6 @@ app.get("/geo/search", async (req, res) => {
     }
 
     const data = await r.json();
-    // Normalize fields
     const out = (data || []).map((x) => ({
       display_name: x.display_name,
       lat: Number(x.lat),
@@ -1220,7 +1198,6 @@ app.get("/geo/search", async (req, res) => {
 });
 
 
-// Login
 app.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -1250,7 +1227,6 @@ app.post("/auth/login", async (req, res) => {
 });
 
 
-// Verify Email OTP and return session tokens + create profile
 app.post("/auth/verify-otp", async (req, res) => {
   try {
     const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, location: locationFromReq } = req.body || {};
@@ -1258,8 +1234,6 @@ app.post("/auth/verify-otp", async (req, res) => {
     if (!password) return res.status(400).json({ error: "Password required" });
 
     const cleanCode = String(code).replace(/\s+/g, "").trim();
-    // Supabase Email OTP length can be configured in Dashboard (6 or 8 digits).
-    // We accept both so the app keeps working while you switch it to 6 digits.
     if (!/^\d{6,8}$/.test(cleanCode)) {
       return res.status(400).json({ error: "OTP kod 6 (və ya 8) rəqəmli olmalıdır" });
     }
@@ -1291,7 +1265,6 @@ app.post("/auth/verify-otp", async (req, res) => {
     const finalPhone = phoneFromReq ?? md.phone ?? null;
     const finalLocation = locationFromReq ?? md.location ?? null;
 
-    // Keep auth user_metadata in sync (best-effort)
     try {
       await supabaseAdmin.auth.admin.updateUserById(userId, {
         user_metadata: {
@@ -1312,13 +1285,11 @@ app.post("/auth/verify-otp", async (req, res) => {
       company_name: finalCompanyName,
       phone: finalPhone,
       location: finalLocation,
-      // Employers start as 'pending', Seekers as 'active'
       status: finalRole === "employer" ? "pending" : "active",
     });
 
     if (profErr) return res.status(400).json({ error: profErr.message });
 
-    // Set password after OTP verification so user can login with email+password
     try {
       const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(userId, { password });
       if (updErr) return res.status(400).json({ error: updErr.message });
@@ -1326,9 +1297,6 @@ app.post("/auth/verify-otp", async (req, res) => {
       return res.status(500).json({ error: e.message || "Password set failed" });
     }
 
-    // IMPORTANT:
-    // Updating password can invalidate the OTP session tokens.
-    // So we create a *fresh* session via email+password and return that token.
     const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email, password });
     if (signinErr || !signin?.session || !signin?.user) {
       return res.status(400).json({ error: signinErr?.message || "Login after OTP failed" });
@@ -1337,7 +1305,6 @@ app.post("/auth/verify-otp", async (req, res) => {
     const profile = await getProfile(userId);
     await logEvent("auth_register_verified", userId, { email, role: profile?.role || finalRole });
 
-    // STRICT REGISTRATION: If pending, do NOT return token to prevent auto-login.
     if (profile?.status === "pending") {
       return res.json({
         ok: true,
@@ -1359,13 +1326,11 @@ app.post("/auth/verify-otp", async (req, res) => {
   }
 });
 
-// Resend signup confirmation email
 app.post("/auth/resend-otp", async (req, res) => {
   try {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: "email required" });
 
-    // OTP yenidən göndərmək üçün eyni OTP axınını çağırırıq.
     const { error } = await supabaseAnon.auth.signInWithOtp({
       email,
       options: { shouldCreateUser: true },
@@ -1387,7 +1352,6 @@ app.post("/auth/resend-otp", async (req, res) => {
 
 
 
-// Refresh access token using refresh_token (Supabase Auth)
 app.post("/auth/refresh", async (req, res) => {
   try {
     const refreshToken = req.body?.refreshToken;
@@ -1425,7 +1389,6 @@ app.post("/auth/refresh", async (req, res) => {
     }
 
     const profile = await getProfile(userId);
-    // Fix: 'email' and 'finalRole' were undefined here.
     const userEmail = data.user?.email;
     await logEvent("auth_refreshed", userId, { email: userEmail, role: profile?.role });
 
@@ -1440,7 +1403,6 @@ app.post("/auth/refresh", async (req, res) => {
 });
 
 
-// Update my location
 app.patch("/me/location", requireAuth, async (req, res) => {
   try {
     const loc = req.body?.location;
@@ -1451,7 +1413,6 @@ app.patch("/me/location", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Invalid location range" });
     }
 
-    // Prevent broken coordinates (this would make seeker listings return 0 items)
     if (!isValidLatLng(loc.lat, loc.lng)) {
       return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
     }
@@ -1471,7 +1432,6 @@ app.patch("/me/location", requireAuth, async (req, res) => {
   }
 });
 
-// Save Expo Push Token (for notifications)
 app.post("/me/push-token", requireAuth, async (req, res) => {
   try {
     const expoPushToken = req.body?.expoPushToken;
@@ -1479,7 +1439,6 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "expoPushToken required" });
     }
 
-    // 1) Upsert into push_tokens (preferred)
     const { error: tokErr } = await supabaseAdmin
       .from("push_tokens")
       .upsert(
@@ -1490,7 +1449,6 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       return res.status(400).json({ error: tokErr.message || "Update failed" });
     }
 
-    // 2) Best-effort legacy storage on profiles (optional)
     await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: expoPushToken })
@@ -1504,10 +1462,8 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
   }
 });
 
-// Remove Expo Push Token (disable notifications)
 app.delete("/me/push-token", requireAuth, async (req, res) => {
   try {
-    // 1) Remove from push_tokens
     await supabaseAdmin
       .from("push_tokens")
       .delete()
@@ -1515,7 +1471,6 @@ app.delete("/me/push-token", requireAuth, async (req, res) => {
       .then(() => { })
       .catch(() => { });
 
-    // 2) Best-effort legacy storage clear
     await supabaseAdmin
       .from("profiles")
       .update({ expo_push_token: null })
@@ -1530,7 +1485,6 @@ app.delete("/me/push-token", requireAuth, async (req, res) => {
   }
 });
 
-// Ratings
 app.post("/ratings", requireAuth, async (req, res) => {
   try {
     const { target_id, job_id, score, comment } = req.body || {};
@@ -1543,7 +1497,6 @@ app.post("/ratings", requireAuth, async (req, res) => {
 
     if (req.authUser.id === target_id) return res.status(400).json({ error: "Cannot rate yourself" });
 
-    // 1. Insert Rating
     const { error: insErr } = await supabaseAdmin.from("ratings").insert({
       reviewer_id: req.authUser.id,
       target_id,
@@ -1559,8 +1512,6 @@ app.post("/ratings", requireAuth, async (req, res) => {
       return res.status(400).json({ error: insErr.message });
     }
 
-    // 2. Recalculate Average
-    // Fetch all ratings for this target
     const { data: allRatings, error: rErr } = await supabaseAdmin
       .from("ratings")
       .select("score")
@@ -1585,9 +1536,7 @@ app.post("/ratings", requireAuth, async (req, res) => {
   }
 });
 
-// -------------------- Forgot Password --------------------
 
-// 1. Send OTP for password reset
 app.post("/auth/forgot-password", async (req, res) => {
   try {
     const { email } = req.body || {};
@@ -1595,7 +1544,6 @@ app.post("/auth/forgot-password", async (req, res) => {
 
     const cleanEmail = String(email).trim().toLowerCase();
 
-    // Send OTP
     const { error } = await supabaseAnon.auth.signInWithOtp({
       email: cleanEmail,
       options: { shouldCreateUser: false },
@@ -1603,7 +1551,6 @@ app.post("/auth/forgot-password", async (req, res) => {
 
     if (error) {
       const msg = error.message || "Auth error";
-      console.error("Forgot Pass Error:", msg);
       const lower = msg.toLowerCase();
       if (lower.includes("rate") && lower.includes("limit")) {
         return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla." });
@@ -1617,7 +1564,6 @@ app.post("/auth/forgot-password", async (req, res) => {
   }
 });
 
-// 2. Verify OTP and Reset Password
 app.post("/auth/reset-password", async (req, res) => {
   try {
     const { email, code, password } = req.body || {};
@@ -1626,13 +1572,10 @@ app.post("/auth/reset-password", async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanCode = String(code).replace(/\s+/g, "").trim();
 
-    console.log(`Reset attempt for: ${cleanEmail}, code len: ${cleanCode.length}`);
 
-    // Verify OTP - Try multiple types to be robust
     let verifyData = null;
     let verifyError = null;
 
-    // 1. Try 'email' (Magic Link / Login code)
     const { data: d1, error: e1 } = await supabaseAnon.auth.verifyOtp({
       email: cleanEmail,
       token: cleanCode,
@@ -1641,7 +1584,6 @@ app.post("/auth/reset-password", async (req, res) => {
     if (!e1 && d1?.session) verifyData = d1;
     else verifyError = e1;
 
-    // 2. Try 'recovery' (Reset Password code)
     if (!verifyData) {
       const { data: d2, error: e2 } = await supabaseAnon.auth.verifyOtp({
         email: cleanEmail,
@@ -1651,7 +1593,6 @@ app.post("/auth/reset-password", async (req, res) => {
       if (!e2 && d2?.session) verifyData = d2;
     }
 
-    // 3. Try 'signup' (Unconfirmed user code)
     if (!verifyData) {
       const { data: d3, error: e3 } = await supabaseAnon.auth.verifyOtp({
         email: cleanEmail,
@@ -1662,18 +1603,15 @@ app.post("/auth/reset-password", async (req, res) => {
     }
 
     if (!verifyData) {
-      console.error("Verify OTP Failed (all types):", verifyError?.message);
       return res.status(400).json({ error: verifyError?.message || "Kod yanlışdır və ya müddəti bitib." });
     }
 
     const data = verifyData;
     const userId = data.user.id;
 
-    // Update Password
     const { error: updErr } = await supabaseAdmin.auth.admin.updateUserById(userId, { password });
     if (updErr) return res.status(400).json({ error: updErr.message });
 
-    // Return new session (auto-login)
     const { data: signin, error: signinErr } = await supabaseAnon.auth.signInWithPassword({ email: cleanEmail, password });
 
     if (signinErr) return res.status(400).json({ error: "Şifrə dəyişdi, amma avto-giriş alınmadı. Zəhmət olmasa giriş edin." });
@@ -1689,12 +1627,10 @@ app.post("/auth/reset-password", async (req, res) => {
     });
 
   } catch (e) {
-    console.error("Reset Password Server Error:", e);
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
 
-// -------------------- Notifications (in-app inbox) --------------------
 
 app.get("/me/notifications", requireAuth, async (req, res) => {
   try {
@@ -1769,9 +1705,7 @@ app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
   }
 });
 
-// -------------------- Job Alerts (İş Bildirişləri) --------------------
 
-// List alerts
 app.get("/me/alerts", requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
@@ -1787,12 +1721,10 @@ app.get("/me/alerts", requireAuth, async (req, res) => {
   }
 });
 
-// Create alert
 app.post("/me/alerts", requireAuth, async (req, res) => {
   try {
-    const { query, min_wage, max_wage, job_type, location, radius_m } = req.body;
+    const { query, min_wage, max_wage, job_type, location, radius_m, category } = req.body;
 
-    // Validate: at least one criteria
     if (!query && !min_wage && !job_type && !location) {
       return res.status(400).json({ error: "Ən azı bir kriteriya seçilməlidir (açar söz, maaş, növ və ya məkan)." });
     }
@@ -1806,6 +1738,7 @@ app.post("/me/alerts", requireAuth, async (req, res) => {
       location_lat: location?.lat || null,
       location_lng: location?.lng || null,
       radius_m: Number(radius_m) || null,
+      category: category ? String(category).trim() : null,
     };
 
     const { data, error } = await supabaseAdmin
@@ -1817,13 +1750,19 @@ app.post("/me/alerts", requireAuth, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
 
     await logEvent("alert_create", req.authUser.id, { alert_id: data.id });
+
+    // Notify nearby Employers if this alert has category + location
+    if (data.category && data.location_lat && data.location_lng) {
+      // Run in background
+      notifyNearbyEmployers(data, req.authUser.user_metadata?.fullName || "İş axtaran").catch(console.error);
+    }
+
     return res.json(data);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-// Delete alert
 app.delete("/me/alerts/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1840,8 +1779,6 @@ app.delete("/me/alerts/:id", requireAuth, async (req, res) => {
   }
 });
 
-// List jobs (search + optional createdBy filter)
-// Guest mode supported: if no auth token is provided, returns latest open jobs.
 app.get("/jobs", optionalAuth, async (req, res) => {
   try {
     const createdBy = req.query.createdBy ? String(req.query.createdBy) : null;
@@ -1853,14 +1790,12 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     const profile = req.authUser ? await getProfile(req.authUser.id) : null;
     let baseLat = toNum(req.query.lat) ?? toNum(profile?.location?.lat);
     let baseLng = toNum(req.query.lng) ?? toNum(profile?.location?.lng);
-    // Guard against bad data (e.g. manual input like 98789797)
     if (baseLat !== null && baseLng !== null && !isValidLatLng(baseLat, baseLng)) {
       baseLat = null;
       baseLng = null;
     }
     const radiusM = toNum(req.query.radius_m) ?? null;
 
-    // Auto-delete expired jobs (best-effort)
     await cleanupExpiredJobs();
 
     let query = supabaseAdmin
@@ -1872,24 +1807,10 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     if (createdBy) {
       if (!req.authUser) return res.status(401).json({ error: "Unauthorized" });
-      // Security: only allow "my jobs" filter for the current user
       if (createdBy !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
       query = query.eq("created_by", req.authUser.id);
 
-      // If listing my own jobs, I want to see everything (open, pending, closed).
-      // So NO status filter here.
     } else {
-      // Public listing: only show OPEN jobs.
-      // Filter out pending, closed, suspended, etc.
-      // Note: 'status' column might not be populated for very old rows (default is null or 'open' via schema default).
-      // It's safer to check for 'open' explicitly or use a list if we support others.
-      // Given schema default is 'open', null is effectively 'open' for old rows.
-      // But let's look at migration_approval.sql: it set default to 'active' for profiles, but for jobs...
-      // Wait, let me check where 'status' column for jobs was added.
-      // Ah, I don't recall adding a migration for jobs status.
-      // I should double check if jobs table has status column.
-      // Code 1832: .in("status", ["open", "closed"]) suggests it exists.
-      // If it exists, filter by it.
       query = query.eq("status", "open");
     }
 
@@ -1897,7 +1818,6 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     if (q) {
       const safe = q.replaceAll(",", " ").trim();
-      // OR filter for title/category
       query = query.or(`title.ilike.%${safe}%,category.ilike.%${safe}%`);
     }
 
@@ -1937,7 +1857,6 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         category: r.category,
         description: r.description,
         wage: r.wage,
-        // Hide contact fields for guests; app will prompt users to login to see them.
         whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
         phone: req.authUser ? (r.contact_phone ?? null) : null,
         link: req.authUser ? (r.contact_link ?? null) : null,
@@ -1968,17 +1887,11 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       items = items.filter((j) => typeof j.distanceM !== "number" || j.distanceM <= radiusM);
     }
 
-    // Sort closest first if distance exists
-    if (baseLat !== null && baseLng !== null) {
-      items.sort((a, b) => (a.distanceM ?? 1e18) - (b.distanceM ?? 1e18));
-    }
 
-    // Hide closed jobs for guests + seekers by default
     if (!profile || profile?.role === "seeker") {
       items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
     }
 
-    // Guest mode: do not expose contact details without login.
     if (!req.authUser) {
       items = items.map((j) => ({
         ...j,
@@ -1994,14 +1907,11 @@ app.get("/jobs", optionalAuth, async (req, res) => {
   }
 });
 
-// Get a single job by id
-// Guest mode supported: contacts are hidden without login.
 app.get("/jobs/:id", optionalAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "id required" });
 
-    // Auto-delete expired jobs (best-effort)
     await cleanupExpiredJobs();
 
     const { data, error } = await supabaseAdmin
@@ -2040,7 +1950,6 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
 
-    // Hide closed jobs from seekers + guests (acts like not found)
     if ((!profile || profile?.role === "seeker") && String(job.status || "open").toLowerCase() === "closed") {
       return res.status(404).json({ error: "Not found" });
     }
@@ -2055,7 +1964,6 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
   }
 });
 
-// Create job (employer only)
 app.post("/jobs", requireAuth, async (req, res) => {
   try {
     const profile = await getProfile(req.authUser.id);
@@ -2096,8 +2004,6 @@ app.post("/jobs", requireAuth, async (req, res) => {
     let locLng = toNum(location?.lng);
     let locAddr = location?.address ? String(location.address) : null;
 
-    // Some clients may fail to send location. In that case, fallback to employer profile location
-    // so seekers can still see the job in radius-based listings.
     if ((locLat === null || locLng === null) && profile?.location) {
       const pLat = toNum(profile.location.lat);
       const pLng = toNum(profile.location.lng);
@@ -2108,7 +2014,6 @@ app.post("/jobs", requireAuth, async (req, res) => {
       }
     }
 
-    // Hard validation: avoid corrupt coordinates (e.g. manual input)
     if (locLat === null || locLng === null) {
       return res.status(400).json({ error: "Lokasiya seçilməlidir" });
     }
@@ -2116,14 +2021,12 @@ app.post("/jobs", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
     }
 
-    // Check if this is the first job (for moderation)
     const { count: existingJobsCount } = await supabaseAdmin
       .from("jobs")
       .select("id", { count: "exact", head: true })
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    // First job -> pending. Subsequent -> open.
     const initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
 
     const payload = {
@@ -2137,9 +2040,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       contact_phone: (contactPhone || phone) ? String(contactPhone || phone).trim() : null,
       contact_link: (contactLink || link) ? String(contactLink || link).trim() : null,
       voen: voen ? String(voen).trim() : null,
-      // Keep old boolean field for mobile compatibility
       is_daily: jt === "temporary",
-      // New fields (may not exist yet — fallback below)
       job_type: jt,
       duration_days: dDays,
       expires_at: expiresAt,
@@ -2159,7 +2060,6 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .single());
 
     if (error) {
-      // If the DB schema is not migrated yet, retry without new columns (so the app keeps working).
       const msg = String(error.message || "");
       if (/column .*\b(job_type|duration_days|expires_at|status)\b/i.test(msg)) {
         const fallback = { ...payload };
@@ -2206,12 +2106,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title, job_type: job.jobType, duration_days: job.durationDays });
 
-    // Fire-and-forget: check detailed job alerts
-    processJobAlerts(job).catch((e) => console.warn("processJobAlerts failed", e?.message || e));
 
-    // Fire-and-forget: notify nearby seekers (push notifications), if enabled.
-    // This will not block the API response.
-    notifyNearbySeekers(job).catch((e) => console.warn("notifyNearbySeekers failed", e?.message || e));
 
     return res.json(job);
   } catch (e) {
@@ -2219,7 +2114,6 @@ app.post("/jobs", requireAuth, async (req, res) => {
   }
 });
 
-// Close a job (employer owner only)
 app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -2240,12 +2134,10 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
     const reason = req.body?.reason ? String(req.body.reason) : "filled";
     const nowIso = new Date().toISOString();
 
-    // Preferred schema: status/closed_at/closed_reason
     const updatePayload = {
       status: "closed",
       closed_at: nowIso,
       closed_reason: reason,
-      // Also set expires_at to now so older clients that only rely on expiry will stop seeing it.
       expires_at: nowIso,
     };
 
@@ -2261,7 +2153,6 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
 
     if (uErr) {
       const msg = String(uErr.message || "");
-      // Fallback for old schema (no status/closed columns)
       if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -2278,7 +2169,6 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
 
     await logEvent("job_close", req.authUser.id, { job_id: id, reason });
 
-    // Map to app shape
     return res.json({
       id: updated.id,
       title: updated.title,
@@ -2305,7 +2195,6 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
   }
 });
 
-// Backward/alternate path support (some clients may call singular `/job`)
 app.patch("/job/:id/close", requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -2384,7 +2273,6 @@ app.patch("/job/:id/close", requireAuth, async (req, res) => {
   }
 });
 
-// Re-open a job (employer owner only)
 app.patch("/jobs/:id/reopen", requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -2456,7 +2344,6 @@ app.patch("/jobs/:id/reopen", requireAuth, async (req, res) => {
   }
 });
 
-// Backward/alternate path support (some clients may call singular `/job`)
 app.patch("/job/:id/reopen", requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -2528,7 +2415,6 @@ app.patch("/job/:id/reopen", requireAuth, async (req, res) => {
   }
 });
 
-// -------------------- Helpers --------------------
 
 function getDistanceM(lat1, lon1, lat2, lon2) {
   if (!lat1 || !lon1 || !lat2 || !lon2) return 99999999;
@@ -2548,7 +2434,6 @@ function getDistanceM(lat1, lon1, lat2, lon2) {
 
 async function processJobAlerts(job) {
   try {
-    // Fetch all alerts (optimize later if needed)
     const { data: alerts, error } = await supabaseAdmin.from("job_alerts").select("*");
     if (error || !alerts?.length) return;
 
@@ -2558,28 +2443,22 @@ async function processJobAlerts(job) {
     const jobTxt = (job.title + " " + (job.description || "")).toLowerCase();
 
     for (const alert of alerts) {
-      // Don't notify the creator
       if (alert.user_id === job.created_by) continue;
 
-      // 1. Check Job Type
       if (alert.job_type && alert.job_type !== job.job_type) continue;
 
-      // 2. Check Wage
       if (alert.min_wage && (job.wage || 0) < alert.min_wage) continue;
       if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
 
-      // 3. Check Query
       if (alert.query) {
         if (!jobTxt.includes(alert.query.toLowerCase())) continue;
       }
 
-      // 4. Check Location (Radius)
       if (alert.location_lat && alert.location_lng && alert.radius_m) {
         const dist = getDistanceM(alert.location_lat, alert.location_lng, jobLat, jobLng);
         if (dist > alert.radius_m) continue;
       }
 
-      // Match found -> ADD TO QUEUE
       queueItems.push({
         user_id: alert.user_id,
         title: "Yeni İş Elanı: " + job.title,
@@ -2590,30 +2469,19 @@ async function processJobAlerts(job) {
     }
 
     if (queueItems.length > 0) {
-      // Insert into QUEUE, not directly to notifications/push
       await supabaseAdmin.from("notification_queue").insert(queueItems);
-      console.log(`[JobAlerts] Queued ${queueItems.length} notifications for Job ${job.id}`);
     }
   } catch (e) {
-    console.error("[JobAlerts] Error:", e);
   }
 }
 
 app.listen(PORT, () => {
-  console.log(`Asimos backend running on :${PORT}`);
-  console.log("Scheduled Notification System (08:00 & 19:00) initialized.");
 });
 
 
-// -------------------- Cron Schedule --------------------
-// Runs at 08:00 and 19:00 every day
-// "0 8,19 * * *"
 cron.schedule("0 8,19 * * *", () => {
-  console.log(`[Cron] Running Scheduled Notification Job at ${new Date().toISOString()}`);
-  processNotificationQueue().catch(e => console.error("[Cron] Error:", e));
 });
 
-// Manual Trigger for Testing/Admin
 app.post("/admin/trigger-notifications", async (req, res) => {
   const { secret } = req.body;
   if (secret !== ADMIN_JWT_SECRET) return res.status(403).json({ error: "Forbidden" });
@@ -2626,7 +2494,6 @@ app.post("/admin/trigger-notifications", async (req, res) => {
 async function processNotificationQueue() {
   const BATCH_SIZE = 500; // Process 500 at a time to avoid memory issues
 
-  // 1. Fetch pending notifications
   const { data: queue, error } = await supabaseAdmin
     .from("notification_queue")
     .select("*")
@@ -2634,31 +2501,25 @@ async function processNotificationQueue() {
     .limit(BATCH_SIZE);
 
   if (error) {
-    console.error("[Queue] Fetch error:", error);
     return { error: error.message };
   }
   if (!queue || queue.length === 0) {
-    console.log("[Queue] No pending notifications.");
     return { processed: 0 };
   }
 
-  // 2. Fetch User Tokens for these items
   const userIds = [...new Set(queue.map(q => q.user_id))];
   const { data: tokens } = await supabaseAdmin
     .from("push_tokens")
     .select("user_id, expo_push_token")
     .in("user_id", userIds);
 
-  // Also fetch from profiles as backup
   const { data: profiles } = await supabaseAdmin
     .from("profiles")
     .select("id, expo_push_token")
     .in("id", userIds);
 
   const tokenMap = new Map();
-  // Prefer push_tokens table
   tokens?.forEach(t => tokenMap.set(t.user_id, t.expo_push_token));
-  // Fallback to profiles table
   profiles?.forEach(p => {
     if (!tokenMap.has(p.id) && p.expo_push_token) {
       tokenMap.set(p.id, p.expo_push_token);
@@ -2672,7 +2533,6 @@ async function processNotificationQueue() {
   for (const item of queue) {
     const token = tokenMap.get(item.user_id);
 
-    // Add to in-app history even if no token (user might see it in app)
     historyRows.push({
       user_id: item.user_id,
       title: item.title,
@@ -2693,19 +2553,16 @@ async function processNotificationQueue() {
     processedIds.push(item.id);
   }
 
-  // 3. Insert into in-app notifications
   if (historyRows.length > 0) {
     await insertNotifications(historyRows);
   }
 
-  // 4. Send Push
   let sentCount = 0;
   if (messages.length > 0) {
     const res = await sendExpoPush(messages);
     sentCount = res.sent || 0;
   }
 
-  // 5. Update Queue Status
   if (processedIds.length > 0) {
     await supabaseAdmin
       .from("notification_queue")
@@ -2713,13 +2570,10 @@ async function processNotificationQueue() {
       .in("id", processedIds);
   }
 
-  console.log(`[Queue] Processed ${processedIds.length} items. Sent ${sentCount} pushes.`);
   return { processed: processedIds.length, sent: sentCount };
 }
 
-// -------------------- Content Pages (Terms, etc.) --------------------
 
-// Public GET
 app.get("/content/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
@@ -2736,27 +2590,15 @@ app.get("/content/:slug", async (req, res) => {
   }
 });
 
-// Admin PUT
 app.put("/admin/content/:slug", async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
-    // Simple Admin Token check (reusing existing admin logic if possible, or simple secret)
-    // The current admin panel uses a JWT. We should implement middleware or check it here.
-    // For now, assuming the admin panel sends the correct token which we verify.
-    // Since we don't have a global `requireAdmin` middleware exposed yet, I'll check manually using `verifyAdminToken` logic if it exists, or just check secret/token.
 
-    // Quick fix: user `req.headers.authorization` assuming Bearer token logic typically handled
-    // But since I don't want to break the pattern, I'll use a simple check or assume `requireAuth` if it supported admin role? 
-    // Actually, `requireAuth` checks DB profile roles. Admin panel usually uses a separate statically configured admin auth.
-    // Given `signAdminToken`, I should verify it.
 
-    // Let's implement a quick verification helper inline or use existing if any.
-    // Inspecting code: `ADMIN_JWT_SECRET` exists.
 
     const token = authHeader.replace("Bearer ", "");
     if (!token) return res.status(401).json({ error: "No token" });
 
-    // Verify JWT
     const [headerB64, payloadB64, sigB64] = token.split(".");
     if (!headerB64 || !payloadB64 || !sigB64) return res.status(401).json({ error: "Invalid token" });
 
@@ -2767,7 +2609,6 @@ app.put("/admin/content/:slug", async (req, res) => {
     const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
     if (payload.exp < Date.now() / 1000) return res.status(403).json({ error: "Token expired" });
 
-    // OK, Admin is valid.
     const { slug } = req.params;
     const { title, body } = req.body;
 

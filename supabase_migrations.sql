@@ -2,7 +2,8 @@ create extension if not exists pgcrypto;
 
 -- Optional: enable Expo push notifications
 alter table public.profiles
-  add column if not exists expo_push_token text;
+  add column if not exists expo_push_token text,
+  add column if not exists category text;
 
 -- Recommended: keep tokens in a separate table (more reliable across schema changes)
 create table if not exists public.push_tokens (
@@ -148,6 +149,7 @@ CREATE TABLE IF NOT EXISTS public.job_alerts (
     location_lat NUMERIC,
     location_lng NUMERIC,
     radius_m INTEGER,    -- Xəritədə seçilən radius (metrlə)
+    category TEXT,
     channel TEXT DEFAULT 'push', -- 'push', 'email', 'both' (gələcək üçün)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
