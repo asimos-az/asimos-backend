@@ -228,14 +228,13 @@ async function notifyNearbySeekers(job) {
     const radiusM = toNum(job?.notify_radius_m ?? job?.notifyRadiusM) ?? 500;
     if (!Number.isFinite(radiusM) || radiusM <= 0) return { ok: false, reason: "invalid_radius" };
 
-    // Fetch seekers in pages
+    // Fetch seekers in pages (REMOVED ROLE FILTER to debug)
     const all = [];
     const PAGE = 1000;
     for (let offset = 0; offset < 20000; offset += PAGE) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
         .select("id, full_name, location, expo_push_token")
-        .eq("role", "seeker")
         .range(offset, offset + PAGE - 1);
 
       if (error) {
@@ -274,6 +273,9 @@ async function notifyNearbySeekers(job) {
     console.log(`[Notify] Checking ${all.length} seekers for Job ${job?.id} at (${lat}, ${lng}) radius=${radiusM}m`);
 
     for (const p of all) {
+      // Don't notify the creator about their own job
+      if (p.id === job.createdBy) continue;
+
       const pl = p?.location || null;
       const plat = toNum(pl?.lat);
       const plng = toNum(pl?.lng);
@@ -299,8 +301,6 @@ async function notifyNearbySeekers(job) {
             sound: "default",
             priority: "high"
           });
-        } else {
-          console.log(`[Notify] Seeker ${p.id} matches (dist=${Math.round(d)}m) but NO TOKEN`);
         }
 
         // 2. Prepare History
@@ -315,6 +315,22 @@ async function notifyNearbySeekers(job) {
     }
 
     console.log(`[Notify] Matched ${matchCount} seekers, sending ${pushMessages.length} pushes.`);
+
+    // DEBUG: If 0 matches, notify the Creator so they know the system worked but found nobody.
+    if (matchCount === 0 && job.createdBy) {
+      const creatorToken = tokenMap.get(job.createdBy) ||
+        (all.find(x => x.id === job.createdBy)?.expo_push_token);
+
+      if (creatorToken && String(creatorToken).startsWith("ExponentPushToken")) {
+        pushMessages.push({
+          to: creatorToken,
+          title: "Debug Bildirişi",
+          body: `Sistem işlədi, amma yaxınlıqda (${radiusM}m) heç kim tapılmadı. Yoxlanıldı: ${all.length} istifadəçi.`,
+          data: { type: "debug" },
+          priority: "high"
+        });
+      }
+    }
 
     // SEND IMMEDIATELY
     if (pushMessages.length > 0) {
