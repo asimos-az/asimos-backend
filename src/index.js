@@ -1183,19 +1183,20 @@ app.get("/geo/search", async (req, res) => {
     const q = (req.query.q || "").toString().trim();
     if (!q) return res.status(400).json({ error: "q is required" });
 
-    // Azerbaijan bounding box (approx): left,top,right,bottom
-    const viewbox = "44.73,41.95,50.62,38.30";
+    // Azerbaijan bounding box (approx)
+    const viewbox = "44.0,42.0,51.0,38.0";
+    // We remove bounded=1 to avoid strict filtering if the point is slightly outside
     const url =
       "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5" +
-      "&addressdetails=1&accept-language=az&countrycodes=az&bounded=1" +
+      "&addressdetails=1&accept-language=az&countrycodes=az" +
       "&viewbox=" + encodeURIComponent(viewbox) +
       "&q=" + encodeURIComponent(q);
 
     const r = await fetch(url, {
       headers: {
         "Accept": "application/json",
-        // Identify the app as per Nominatim usage guidance (server-side is fine)
-        "User-Agent": "Asimos/1.0 (render-backend)",
+        // Identify the app with contact info
+        "User-Agent": "AsimosApp/1.0 (info@asimos.az)",
       },
     });
 
