@@ -172,6 +172,7 @@ async function sendExpoPush(messages) {
   // Expo recommends max 100 messages per request
   const batches = chunk(messages, 100);
   let sent = 0;
+  let paramErrors = [];
 
   for (const batch of batches) {
     const r = await fetch(EXPO_PUSH_ENDPOINT, {
@@ -184,10 +185,38 @@ async function sendExpoPush(messages) {
     });
 
     const data = await r.json().catch(() => null);
+
+    // DEBUG: Log generic error
     if (!r.ok) {
       console.warn("Expo push send failed", r.status, data);
+      await insertNotifications([{
+        user_id: batch[0].data?.jobId ? messages[0].data.jobId : null, // Try to find a target if possible, otherwise skip
+        title: "Expo Error",
+        body: `Status: ${r.status}. Data: ${JSON.stringify(data)}`,
+        data: { type: "debug" }
+      }]);
       continue;
     }
+
+    // DEBUG: Log success details
+    if (data?.data) {
+      // Just grab the first result to show to user
+      const firstRes = data.data[0];
+      // We need a user_id to show this debug log to. 
+      // We can extract it from the map if we passed it, but here we don't have it easily.
+      // However, we know this function is called from notifyNearbySeekers where we logged start/end.
+      // Let's just rely on console logs for now, OR valid notifications.
+      // Actually, let's try to notify the admin/creator if we can pass that info down.
+
+      // BETTER: We can inspect 'details' field in response for errors like 'DeviceNotRegistered'
+      const errorDetails = data.data.filter(x => x.status === "error");
+      if (errorDetails.length > 0) {
+        console.warn("Expo Partial Errors:", errorDetails);
+        // We can't easily notify the user here without knowing WHO the creator was.
+        // BUT, notifyNearbySeekers calls this.
+      }
+    }
+
     sent += batch.length;
   }
   return { ok: true, sent };
