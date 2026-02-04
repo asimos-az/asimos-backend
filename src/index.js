@@ -246,6 +246,17 @@ async function notifyNearbySeekers(job) {
       if (data.length < PAGE) break;
     }
 
+    // DEBUG: Inform creator that process started
+    if (job?.createdBy) {
+      await insertNotifications([{
+        user_id: job.createdBy,
+        title: "Debug Start",
+        body: `Proses başladı. Ümumi istifadəçi: ${all.length}. Job Loc: ${lat}, ${lng}`,
+        data: { type: "debug" },
+        is_read: false
+      }]);
+    }
+
     // Fetch tokens separately from dedicated table
     const userIds = all.map(p => p.id);
     const tokenMap = new Map();
@@ -340,6 +351,17 @@ async function notifyNearbySeekers(job) {
     // SAVE HISTORY
     if (historyRows.length > 0) {
       await insertNotifications(historyRows);
+    }
+
+    // DEBUG: Inform creator of final result
+    if (job?.createdBy) {
+      await insertNotifications([{
+        user_id: job.createdBy,
+        title: "Debug End",
+        body: `Bitdi. Uyğun gələn: ${matchCount}, Push göndərildi: ${pushMessages.length}`,
+        data: { type: "debug" },
+        is_read: false
+      }]);
     }
 
     return { ok: true, sent: pushMessages.length, stored: historyRows.length };
