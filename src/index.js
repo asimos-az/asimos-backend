@@ -2106,6 +2106,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title, job_type: job.jobType, duration_days: job.durationDays });
 
+    processJobAlerts(job).catch(console.error);
+
+
 
 
     return res.json(job);
@@ -2446,6 +2449,9 @@ async function processJobAlerts(job) {
       if (alert.user_id === job.created_by) continue;
 
       if (alert.job_type && alert.job_type !== job.job_type) continue;
+
+      if (alert.category && alert.category !== job.category) continue;
+
 
       if (alert.min_wage && (job.wage || 0) < alert.min_wage) continue;
       if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
