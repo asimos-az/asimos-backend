@@ -2553,7 +2553,9 @@ async function processNotificationQueue() {
         sound: "default",
         title: item.title,
         body: item.body,
-        data: item.data
+        data: item.data,
+        channelId: "default",
+        priority: "high",
       });
     }
     processedIds.push(item.id);
