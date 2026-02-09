@@ -469,6 +469,7 @@ const MS_DAY = 24 * 60 * 60 * 1000;
 
 function normalizeJobType(jobType, isDaily) {
   const raw = String(jobType || "").trim().toLowerCase();
+  if (raw === "seeker") return "seeker";
   if (raw === "temporary" || raw === "temp" || raw.includes("müvəqqəti") || raw.includes("muveqqeti")) return "temporary";
   if (raw === "permanent" || raw === "perm" || raw.includes("daimi")) return "permanent";
   return isDaily ? "temporary" : "permanent";
@@ -1796,6 +1797,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     }
     const radiusM = toNum(req.query.radius_m) ?? null;
 
+    const jobTypeFilter = req.query.jobType ? String(req.query.jobType).trim() : null;
+
     await cleanupExpiredJobs();
 
     let query = supabaseAdmin
@@ -1812,6 +1815,15 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     } else {
       query = query.eq("status", "open");
+
+      if (jobTypeFilter === "seeker") {
+        query = query.eq("job_type", "seeker");
+      } else if (jobTypeFilter === "employer") {
+        query = query.neq("job_type", "seeker");
+      } else {
+        // Default: Show employer jobs only (exclude seeker ads unless requested)
+        query = query.neq("job_type", "seeker");
+      }
     }
 
     if (daily !== null) query = query.eq("is_daily", daily);
@@ -1967,7 +1979,8 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
 app.post("/jobs", requireAuth, async (req, res) => {
   try {
     const profile = await getProfile(req.authUser.id);
-    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can create jobs" });
+    // Allow both employer and seeker
+    if (!["employer", "seeker"].includes(profile?.role)) return res.status(403).json({ error: "Invalid role" });
 
     const {
       title,
@@ -1989,7 +2002,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     if (!title) return res.status(400).json({ error: "Title required" });
 
-    const jt = normalizeJobType(jobType, !!isDaily);
+    // Force jobType='seeker' if user is seeker
+    const forcedType = profile.role === "seeker" ? "seeker" : jobType;
+    const jt = normalizeJobType(forcedType, !!isDaily);
     let dDays = null;
     if (jt === "temporary") {
       dDays = toNum(durationDays);
