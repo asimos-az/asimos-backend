@@ -154,7 +154,7 @@ async function logEvent(type, actorId, metadata) {
     } else if (type === "admin_login_success") {
       msg = `🛡️ <b>Admin Girişi</b>\nEmail: ${meta.email}`;
     } else if (type === "job_create") {
-      const mapLink = meta.lat && meta.lng ? `https://www.google.com/maps?q=${meta.lat},${meta.lng}` : "Yoxdur";
+      const mapLink = meta.lat && meta.lng ? `https://www.google.com/maps/search/?api=1&query=${meta.lat},${meta.lng}` : "Yoxdur";
       msg = `📢 <b>Yeni Elan</b>\n\n` +
         `🔹 <b>Başlıq:</b> ${meta.title}\n` +
         `💰 <b>Maaş:</b> ${meta.wage ? meta.wage + " AZN" : "Razılaşma ilə"}\n` +
