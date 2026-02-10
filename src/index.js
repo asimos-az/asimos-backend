@@ -2581,7 +2581,7 @@ app.get("/admin/support", requireAdmin, async (req, res) => {
 
     const { data, error } = await supabaseAdmin
       .from("support_tickets")
-      .select("*, profiles(full_name, email, phone)")
+      .select("*, profiles(full_name, phone)")
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
@@ -2597,7 +2597,7 @@ app.get("/admin/support/:id", requireAdmin, async (req, res) => {
     const { id } = req.params;
     const { data: ticket, error } = await supabaseAdmin
       .from("support_tickets")
-      .select("*, profiles(full_name, email, phone), support_messages(*)")
+      .select("*, profiles(full_name, phone), support_messages(*)")
       .eq("id", id)
       .single();
 
