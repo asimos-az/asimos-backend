@@ -154,9 +154,23 @@ async function logEvent(type, actorId, metadata) {
     } else if (type === "admin_login_success") {
       msg = `🛡️ <b>Admin Girişi</b>\nEmail: ${meta.email}`;
     } else if (type === "job_create") {
-      msg = `📢 <b>Yeni Elan</b>\nBaşlıq: ${meta.title}\nNöv: ${meta.job_type === "temporary" ? "Müvəqqəti" : "Daimi"}\nGün: ${meta.duration_days || 1}`;
+      const mapLink = meta.lat && meta.lng ? `https://www.google.com/maps?q=${meta.lat},${meta.lng}` : "Yoxdur";
+      msg = `📢 <b>Yeni Elan</b>\n\n` +
+        `🔹 <b>Başlıq:</b> ${meta.title}\n` +
+        `💰 <b>Maaş:</b> ${meta.wage ? meta.wage + " AZN" : "Razılaşma ilə"}\n` +
+        `k <b>Kateqoriya:</b> ${meta.category || "Qeyd olunmayıb"}\n` +
+        `📝 <b>Təsvir:</b> ${meta.description || "-"}\n` +
+        `🕒 <b>Növ:</b> ${meta.job_type === "temporary" ? "Müvəqqəti" : "Daimi"} (${meta.duration_days || 1} gün)\n` +
+        `📍 <b>Ünvan:</b> ${meta.address || "Qeyd olunmayıb"}\n` +
+        `📞 <b>Əlaqə:</b> ${meta.phone || meta.whatsapp || "-"}\n` +
+        `🔗 <b>Link:</b> ${meta.link || "-"}\n` +
+        `🗺 <b>Xəritə:</b> <a href="${mapLink}">Xəritədə bax</a>`;
     } else if (type === "support_ticket") {
-      msg = `📩 <b>Dəstək Bileti</b>\nMövzu: ${meta.subject}\nEmail: ${meta.email}`;
+      msg = `📩 <b>Dəstək Bileti</b>\n\n` +
+        `👤 <b>İstifadəçi:</b> ${meta.email}\n` +
+        `📂 <b>Kateqoriya:</b> ${meta.category || "Ümumi"}\n` +
+        `❓ <b>Mövzu:</b> ${meta.subject}\n` +
+        `💬 <b>Mesaj:</b>\n${meta.message}`;
     }
 
     if (msg) await sendTelegram(msg);
@@ -2172,7 +2186,21 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
 
-    await logEvent("job_create", req.authUser.id, { job_id: job.id, title: job.title, job_type: job.jobType, duration_days: job.durationDays });
+    await logEvent("job_create", req.authUser.id, {
+      job_id: job.id,
+      title: job.title,
+      job_type: job.jobType,
+      duration_days: job.durationDays,
+      wage: job.wage,
+      category: job.category,
+      description: job.description,
+      address: job.location?.address,
+      lat: job.location?.lat,
+      lng: job.location?.lng,
+      phone: job.phone || job.contactPhone,
+      whatsapp: job.whatsapp,
+      link: job.link
+    });
 
     processJobAlerts(job).catch(console.error);
 
@@ -2577,7 +2605,9 @@ app.post("/support", requireAuth, async (req, res) => {
     // Notify Telegram
     await logEvent("support_ticket", req.authUser.id, {
       subject: ticket.subject,
-      email: req.authUser.email
+      email: req.authUser.email,
+      category: category || "Dəstək",
+      message: message
     });
 
     return res.json({ ok: true, ticket });
