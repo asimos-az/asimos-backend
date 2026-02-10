@@ -2496,6 +2496,190 @@ async function processJobAlerts(job) {
   }
 }
 
+// --- SUPPORT SYSTEM ---
+
+app.post("/support", requireAuth, async (req, res) => {
+  try {
+    const { subject, message, category } = req.body || {};
+    if (!message) return res.status(400).json({ error: "Mesaj yazılmayıb" });
+
+    // 1. Create Ticket
+    const { data: ticket, error: tErr } = await supabaseAdmin.from("support_tickets").insert({
+      user_id: req.authUser.id,
+      subject: subject || category || "Dəstək",
+      message: message, // Initial message check
+      status: "open",
+    }).select().single();
+
+    if (tErr) return res.status(400).json({ error: tErr.message });
+
+    // 2. Insert initial message to history
+    await supabaseAdmin.from("support_messages").insert({
+      ticket_id: ticket.id,
+      sender_id: req.authUser.id,
+      is_admin: false,
+      message: message,
+    });
+
+    return res.json({ ok: true, ticket });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/support", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select("*, support_messages(*)")
+      .eq("user_id", req.authUser.id)
+      .order("created_at", { ascending: false });
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/support/:id/reply", requireAuth, async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    const { id } = req.params;
+    if (!message) return res.status(400).json({ error: "Mesaj boşdur" });
+
+    // Verify ownership
+    const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id").eq("id", id).single();
+    if (!ticket || ticket.user_id !== req.authUser.id) {
+      return res.status(404).json({ error: "Bilet tapılmadı" });
+    }
+
+    const { error } = await supabaseAdmin.from("support_messages").insert({
+      ticket_id: id,
+      sender_id: req.authUser.id,
+      is_admin: false,
+      message,
+    });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Update status to open if it was closed or replied
+    await supabaseAdmin.from("support_tickets").update({ status: "open", is_answered: false }).eq("id", id);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin Support Routes
+
+app.get("/admin/support", requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    const { data, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select("*, profiles(full_name, email, phone)")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items: data, limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/admin/support/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: ticket, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select("*, profiles(full_name, email, phone), support_messages(*)")
+      .eq("id", id)
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // sort messages
+    if (ticket.support_messages) {
+      ticket.support_messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    }
+
+    return res.json(ticket);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message, status } = req.body || {};
+    if (!message) return res.status(400).json({ error: "Mesaj yazılmayıb" });
+
+    // 1. Add message
+    const { error } = await supabaseAdmin.from("support_messages").insert({
+      ticket_id: id,
+      sender_id: null, // Admin
+      is_admin: true,
+      message,
+    });
+    if (error) return res.status(400).json({ error: error.message });
+
+    // 2. Update ticket
+    await supabaseAdmin.from("support_tickets").update({
+      status: status || "replied",
+      is_answered: true
+    }).eq("id", id);
+
+    // 3. Notify User
+    const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id, subject").eq("id", id).single();
+    if (ticket?.user_id) {
+      const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", ticket.user_id);
+
+      const title = "Dəstək Mərkəzi";
+      const body = `Sizin müraciətinizə cavab gəldi: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`;
+
+      const msgs = [];
+      const history = [];
+
+      // Send to tokens
+      if (userTokens) {
+        for (const t of userTokens) {
+          if (t.expo_push_token) {
+            msgs.push({
+              to: t.expo_push_token,
+              title,
+              body,
+              data: { type: "support", ticketId: id },
+              sound: "default"
+            });
+          }
+        }
+      }
+
+      // Send Notification to inbox
+      history.push({
+        user_id: ticket.user_id,
+        title,
+        body,
+        data: { type: "support", ticketId: id }
+      });
+
+      if (msgs.length) sendExpoPush(msgs).catch(() => { });
+      if (history.length) insertNotifications(history).catch(() => { });
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.listen(PORT, () => {
 });
 
