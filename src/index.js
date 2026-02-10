@@ -113,6 +113,28 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// --- TELEGRAM CONFIG ---
+const TELEGRAM_BOT_TOKEN = "8523281077:AAEtiS8wd8a5E8oto4htgPAUdeLQqEpZJl4";
+const TELEGRAM_CHAT_ID = "5920740941";
+
+async function sendTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  try {
+    const url = `https://api.telegram.org/bot\${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: text,
+        parse_mode: "HTML"
+      })
+    });
+  } catch (e) {
+    console.error("Telegram error:", e.message);
+  }
+}
+
 async function logEvent(type, actorId, metadata) {
   try {
     await supabaseAdmin.from("events").insert({
@@ -120,7 +142,27 @@ async function logEvent(type, actorId, metadata) {
       actor_id: actorId || null,
       metadata: metadata || null,
     });
-  } catch {
+
+    // --- TELEGRAM NOTIFICATIONS ---
+    let msg = "";
+    const meta = metadata || {};
+
+    if (type === "auth_register_verified") {
+      msg = `🚀 <b>Yeni İstifadəçi</b>\nEmail: ${meta.email}\nRol: ${meta.role || "seeker"}`;
+    } else if (type === "auth_login") {
+      // msg = `🟢 <b>Giriş</b>\nEmail: ${meta.email}`; 
+    } else if (type === "admin_login_success") {
+      msg = `🛡️ <b>Admin Girişi</b>\nEmail: ${meta.email}`;
+    } else if (type === "job_create") {
+      msg = `📢 <b>Yeni Elan</b>\nBaşlıq: ${meta.title}\nNöv: ${meta.job_type === "temporary" ? "Müvəqqəti" : "Daimi"}\nGün: ${meta.duration_days || 1}`;
+    } else if (type === "support_ticket") {
+      msg = `📩 <b>Dəstək Bileti</b>\nMövzu: ${meta.subject}\nEmail: ${meta.email}`;
+    }
+
+    if (msg) await sendTelegram(msg);
+
+  } catch (e) {
+    console.error("Log event error:", e.message);
   }
 }
 
@@ -1278,6 +1320,17 @@ app.post("/auth/verify-otp", async (req, res) => {
         },
       });
     } catch { }
+
+    // Check if profile exists (if not, it's a new or resurrected user -> clean up potential orphans)
+    const { data: existingProfile } = await supabaseAdmin.from("profiles").select("id").eq("id", userId).maybeSingle();
+    if (!existingProfile) {
+      try {
+        await supabaseAdmin.from("notifications").delete().eq("user_id", userId);
+        await supabaseAdmin.from("job_alerts").delete().eq("user_id", userId);
+        await supabaseAdmin.from("push_tokens").delete().eq("user_id", userId);
+      } catch { }
+    }
+
 
     const { error: profErr } = await supabaseAdmin.from("profiles").upsert({
       id: userId,
@@ -2519,6 +2572,12 @@ app.post("/support", requireAuth, async (req, res) => {
       sender_id: req.authUser.id,
       is_admin: false,
       message: message,
+    });
+
+    // Notify Telegram
+    await logEvent("support_ticket", req.authUser.id, {
+      subject: ticket.subject,
+      email: req.authUser.email
     });
 
     return res.json({ ok: true, ticket });
