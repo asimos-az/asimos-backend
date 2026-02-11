@@ -2019,7 +2019,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
     if (!data) return res.status(404).json({ error: "Not found" });
 
-    const profile = req.authUser ? await getProfile(req.authUser.id) : null;
+    const profile = (req.authUser && !req.authUser.is_admin) ? await getProfile(req.authUser.id) : null;
     const baseLat = toNum(profile?.location?.lat);
     const baseLng = toNum(profile?.location?.lng);
 
