@@ -604,6 +604,21 @@ async function optionalAuth(req, res, next) {
       req.accessToken = null;
       return next();
     }
+
+    // 1. Try Admin Token
+    const adminPayload = verifyAdminToken(token);
+    if (adminPayload) {
+      req.authUser = {
+        id: "admin",
+        email: adminPayload.email,
+        role: "admin",
+        is_admin: true
+      };
+      req.accessToken = token;
+      return next();
+    }
+
+    // 2. Try Supabase Token
     const { data, error } = await supabaseAnon.auth.getUser(token);
     if (error || !data?.user) {
       req.authUser = null;
@@ -2014,6 +2029,8 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       category: data.category,
       description: data.description,
       wage: data.wage,
+      whatsapp: (req.authUser || data.whatsapp) ? (data.whatsapp ?? null) : null, // Show if auth OR if field exists (logic tweak) - actually keeping original logic but ensuring admin gets it. 
+      // Better:
       whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
       phone: req.authUser ? (data.contact_phone ?? null) : null,
       link: req.authUser ? (data.contact_link ?? null) : null,
@@ -2030,6 +2047,24 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       closedReason: (data.closed_reason ?? null),
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
     };
+
+    // Fetch creator profile
+    if (data.created_by) {
+      const { data: creator } = await supabaseAdmin
+        .from("profiles")
+        .select("email, full_name, phone, role")
+        .eq("id", data.created_by)
+        .single();
+
+      if (creator) {
+        job.creator = {
+          email: creator.email,
+          fullName: creator.full_name,
+          phone: creator.phone,
+          role: creator.role
+        };
+      }
+    }
 
     if ((!profile || profile?.role === "seeker") && String(job.status || "open").toLowerCase() === "closed") {
       return res.status(404).json({ error: "Not found" });
