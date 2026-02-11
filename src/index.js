@@ -2014,7 +2014,10 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    const initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
+    let initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
+    if (req.authUser.is_admin || req.authUser.role === "admin") {
+      initialStatus = "open";
+    }
 
     const payload = {
       created_by: req.authUser.id,
