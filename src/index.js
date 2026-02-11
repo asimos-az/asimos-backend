@@ -154,17 +154,19 @@ async function logEvent(type, actorId, metadata) {
     } else if (type === "admin_login_success") {
       msg = `🛡️ <b>Admin Girişi</b>\nEmail: ${meta.email}`;
     } else if (type === "job_create") {
-      const mapLink = meta.lat && meta.lng ? `https://www.google.com/maps/search/?api=1&query=${meta.lat},${meta.lng}` : "Yoxdur";
+      const mapLink = meta.lat && meta.lng ? `https://maps.google.com/?q=loc:${meta.lat},${meta.lng}` : "Yoxdur";
+      const wazeLink = meta.lat && meta.lng ? `https://waze.com/ul?ll=${meta.lat},${meta.lng}&navigate=yes` : "Yoxdur";
+
       msg = `📢 <b>Yeni Elan</b>\n\n` +
         `🔹 <b>Başlıq:</b> ${meta.title}\n` +
         `💰 <b>Maaş:</b> ${meta.wage ? meta.wage + " AZN" : "Razılaşma ilə"}\n` +
-        `k <b>Kateqoriya:</b> ${meta.category || "Qeyd olunmayıb"}\n` +
+        `📂 <b>Kateqoriya:</b> ${meta.category || "Qeyd olunmayıb"}\n` +
         `📝 <b>Təsvir:</b> ${meta.description || "-"}\n` +
         `🕒 <b>Növ:</b> ${meta.job_type === "temporary" ? "Müvəqqəti" : "Daimi"} (${meta.duration_days || 1} gün)\n` +
         `📍 <b>Ünvan:</b> ${meta.address || "Qeyd olunmayıb"}\n` +
         `📞 <b>Əlaqə:</b> ${meta.phone || meta.whatsapp || "-"}\n` +
         `🔗 <b>Link:</b> ${meta.link || "-"}\n` +
-        `🗺 <b>Xəritə:</b> <a href="${mapLink}">Xəritədə bax</a>`;
+        `🗺 <b>Xəritə:</b> <a href="${mapLink}">Google Maps</a> | <a href="${wazeLink}">Waze</a>`;
     } else if (type === "support_ticket") {
       msg = `📩 <b>Dəstək Bileti</b>\n\n` +
         `👤 <b>İstifadəçi:</b> ${meta.email}\n` +
