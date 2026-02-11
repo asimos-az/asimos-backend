@@ -2823,6 +2823,114 @@ app.post("/admin/trigger-notifications", async (req, res) => {
     .catch(e => res.status(500).json({ error: e.message }));
 });
 
+async function notifyNearbySeekers(job) {
+  try {
+    const lat = toNum(job.location_lat ?? job.location?.lat);
+    const lng = toNum(job.location_lng ?? job.location?.lng);
+
+    if (lat === null || lng === null) return;
+
+    // Use job radius if provided, otherwise default to 5000m (5km)
+    // User mentioned "2000" (likely meters) so 500m default was too small.
+    const radiusM = toNum(job.notifyRadiusM ?? job.notify_radius_m) || 5000;
+
+    // 1. Fetch seekers with location
+    // Filter by role='seeker' to avoid spamming employers
+    // Optimisation: We fetch minimal fields
+    const { data: seekers, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, location, expo_push_token")
+      .eq("role", "seeker")
+      .not("location", "is", null);
+
+    if (error || !seekers) return;
+
+    const validSeekers = seekers.filter(s => {
+      const slat = toNum(s.location?.lat);
+      const slng = toNum(s.location?.lng);
+      if (slat === null || slng === null) return false;
+
+      const dist = haversineDistanceM(lat, lng, slat, slng);
+      return dist <= radiusM;
+    });
+
+    if (validSeekers.length === 0) return;
+
+    // 2. Prepare notifications
+    const title = "Yaxınlıqda yeni iş!";
+    const body = `${job.title} (${job.wage ? job.wage + " AZN" : "Razılaşma"})`;
+
+    const notifications = [];
+    const pushMessages = [];
+
+    // 3. Get extra tokens from push_tokens table
+    const userIds = validSeekers.map(s => s.id);
+    const { data: extraTokens } = await supabaseAdmin
+      .from("push_tokens")
+      .select("user_id, expo_push_token")
+      .in("user_id", userIds);
+
+    const tokenMap = new Map();
+    // Add tokens from profiles
+    validSeekers.forEach(s => {
+      if (s.expo_push_token) {
+        if (!tokenMap.has(s.id)) tokenMap.set(s.id, new Set());
+        tokenMap.get(s.id).add(s.expo_push_token);
+      }
+    });
+    // Add extra tokens
+    if (extraTokens) {
+      extraTokens.forEach(t => {
+        if (t.expo_push_token) {
+          if (!tokenMap.has(t.user_id)) tokenMap.set(t.user_id, new Set());
+          tokenMap.get(t.user_id).add(t.expo_push_token);
+        }
+      });
+    }
+
+    // 4. Send
+    for (const [userId, tokens] of tokenMap) {
+      if (userId === job.createdBy) continue; // Don't notify self
+
+      const dataPayload = { type: "job", jobId: job.id };
+
+      // DB Notification
+      notifications.push({
+        user_id: userId,
+        title,
+        body,
+        data: dataPayload,
+        read_at: null
+      });
+
+      // Push Notifications
+      for (const token of tokens) {
+        if (String(token).startsWith("ExponentPushToken")) {
+          pushMessages.push({
+            to: token,
+            title,
+            body,
+            data: dataPayload,
+            sound: "default"
+          });
+        }
+      }
+    }
+
+    if (notifications.length > 0) {
+      await supabaseAdmin.from("notifications").insert(notifications);
+    }
+
+    if (pushMessages.length > 0) {
+      await sendExpoPush(pushMessages);
+    }
+
+    console.log(`Sent nearby notifications to ${pushMessages.length} devices for job ${job.id}`);
+
+  } catch (e) {
+    console.error("notifyNearbySeekers error:", e);
+  }
+}
 
 async function processNotificationQueue() {
   const BATCH_SIZE = 500; // Process 500 at a time to avoid memory issues
