@@ -631,6 +631,7 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
     if (shouldSendEmail) {
       const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id);
       if (authUser?.user?.email) {
+        await sendApprovalEmail(authUser.user.email, data.full_name || "İstifadəçi");
       }
     }
 
