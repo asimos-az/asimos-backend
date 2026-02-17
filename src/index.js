@@ -743,7 +743,9 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
       location_address: body.location_address ? String(body.location_address) : null,
+      location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
+      job_type: "permanent", // Default for admin created jobs to ensure visibility
     };
 
     if (emp.average_rating && emp.average_rating >= 4.8) {
@@ -1791,7 +1793,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         // Let's relax it to show everything if nothing specified, or stick to Employer.
         // The issue is likely the STATUS. But let's verify job_type too.
         // For now, keep employer defaults but ensure PENDING shows.
-        query = query.neq("job_type", "seeker");
+        // query = query.neq("job_type", "seeker");
       }
     }
 
