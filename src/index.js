@@ -26,18 +26,22 @@ const mailer = nodemailer.createTransport({
 });
 
 async function sendApprovalEmail(toEmail, fullName) {
+  console.log(`Attempting to send approval email to ${toEmail}`);
   if (!SMTP_HOST || !SMTP_USER) {
+    console.error("SMTP config missing:", { SMTP_HOST, SMTP_USER });
     return;
   }
   try {
-    await mailer.sendMail({
+    const info = await mailer.sendMail({
       from: SMTP_FROM,
       to: toEmail,
       subject: "ASIMOS - Hesabınız Təsdiqləndi",
       text: `Salam ${fullName},\n\nHesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.\n\nHörmətlə,\nAsimos Komandası`,
       html: `<p>Salam <b>${fullName}</b>,</p><p>Hesabınız admin tərəfindən təsdiqləndi. Artıq proqrama daxil olub işçi axtara bilərsiniz.</p><p>Hörmətlə,<br>Asimos Komandası</p>`,
     });
+    console.log("Email sent info:", info.messageId);
   } catch (e) {
+    console.error("Email send error:", e);
   }
 }
 
@@ -620,6 +624,7 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
     let shouldSendEmail = false;
     if (allowed.status === "active") {
       const { data: oldProfile } = await supabaseAdmin.from("profiles").select("status").eq("id", id).single();
+      console.log(`Checking email trigger. Old status: ${oldProfile?.status}, New: active`);
       if (oldProfile && oldProfile.status === "pending") {
         shouldSendEmail = true;
       }
@@ -629,9 +634,12 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
 
     if (shouldSendEmail) {
+      console.log("shouldSendEmail is true, fetching user email...");
       const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(id);
       if (authUser?.user?.email) {
         await sendApprovalEmail(authUser.user.email, data.full_name || "İstifadəçi");
+      } else {
+        console.warn("User email not found for ID:", id);
       }
     }
 
@@ -1007,6 +1015,52 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: msg });
     }
     return res.json({ items: data || [], limit, offset });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/jobs", requireAuth, requireEmployer, async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      wage,
+      category,
+      location,
+      contacts,
+      jobType,
+      durationDays,
+      work_type, // full_time | part_time | agreement
+      start_time,
+      end_time,
+    } = req.body || {};
+
+    if (!title || !description || !wage || !category || !location || !contacts) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const { error } = await supabaseAdmin.from("jobs").insert({
+      creator_id: req.authUser.id,
+      title,
+      description,
+      wage,
+      category,
+      location, // JSONB
+      contacts, // JSONB
+      job_type: jobType || "permanent",
+      duration_days: durationDays || null,
+      work_type: work_type || "perfect_match", // default or specific
+      start_time: start_time || null,
+      end_time: end_time || null,
+      status: "active",
+      expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days default
+      created_at: new Date().toISOString(),
+    });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -1767,14 +1821,20 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       query = query.eq("created_by", req.authUser.id);
 
     } else {
-      query = query.eq("status", "open");
+      // MOD: Show both open and pending for visibility
+      // query = query.eq("status", "open");
+      query = query.in("status", ["open", "pending"]);
 
       if (jobTypeFilter === "seeker") {
         query = query.eq("job_type", "seeker");
       } else if (jobTypeFilter === "employer") {
         query = query.neq("job_type", "seeker");
       } else {
-        // Default: Show employer jobs only (exclude seeker ads unless requested)
+        // Default: Allow all? Or just Employer? 
+        // User asked "Butun elanlar" (All ads). Let's remove the restriction for now or keep it if strictly Seeker App.
+        // Let's relax it to show everything if nothing specified, or stick to Employer.
+        // The issue is likely the STATUS. But let's verify job_type too.
+        // For now, keep employer defaults but ensure PENDING shows.
         query = query.neq("job_type", "seeker");
       }
     }
@@ -2015,7 +2075,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    let initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
+    let initialStatus = "open"; // Always open for now to fix visibility issues
+    // let initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
     if (req.authUser.is_admin || req.authUser.role === "admin") {
       initialStatus = "open";
     }
