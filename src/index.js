@@ -1020,51 +1020,7 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
   }
 });
 
-app.post("/jobs", requireAuth, requireEmployer, async (req, res) => {
-  try {
-    const {
-      title,
-      description,
-      wage,
-      category,
-      location,
-      contacts,
-      jobType,
-      durationDays,
-      work_type, // full_time | part_time | agreement
-      start_time,
-      end_time,
-    } = req.body || {};
 
-    if (!title || !description || !wage || !category || !location || !contacts) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    const { error } = await supabaseAdmin.from("jobs").insert({
-      creator_id: req.authUser.id,
-      title,
-      description,
-      wage,
-      category,
-      location, // JSONB
-      contacts, // JSONB
-      job_type: jobType || "permanent",
-      duration_days: durationDays || null,
-      work_type: work_type || "perfect_match", // default or specific
-      start_time: start_time || null,
-      end_time: end_time || null,
-      status: "active",
-      expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days default
-      created_at: new Date().toISOString(),
-    });
-
-    if (error) return res.status(400).json({ error: error.message });
-
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
-});
 
 app.post("/auth/register", async (req, res) => {
   try {
