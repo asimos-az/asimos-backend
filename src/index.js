@@ -1817,6 +1817,19 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
 
     const nowMs = Date.now();
+    
+    // Parse wage filters
+    const minWageParam = req.query.minWage ? Number(req.query.minWage) : null;
+    const maxWageParam = req.query.maxWage ? Number(req.query.maxWage) : null;
+    const categoriesParam = req.query.categories ? String(req.query.categories).split(",").filter(Boolean) : [];
+
+    function extractWageNumber(wageText) {
+      if (!wageText) return null;
+      const m = String(wageText).replace(",", ".").match(/(\d+(?:\.\d+)?)/);
+      if (!m) return null;
+      const n = Number(m[1]);
+      return Number.isFinite(n) ? n : null;
+    }
 
     let items = (data || []).map((r) => {
       const expiresMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
@@ -1863,6 +1876,22 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       if (baseLat !== null && baseLng !== null && typeof loc.lat === "number" && typeof loc.lng === "number") {
         job.distanceM = Math.round(haversineDistanceM(baseLat, baseLng, loc.lat, loc.lng));
       }
+      
+      // Apply Category Filter
+      if (categoriesParam.length > 0) {
+        if (!job.category || !categoriesParam.includes(job.category)) {
+          return null;
+        }
+      }
+
+      // Apply Wage Filter
+      if (minWageParam !== null || maxWageParam !== null) {
+        const w = extractWageNumber(job.wage);
+        if (w === null) return null;
+        if (minWageParam !== null && w < minWageParam) return null;
+        if (maxWageParam !== null && w > maxWageParam) return null;
+      }
+
       return job;
     }).filter(Boolean);
 
