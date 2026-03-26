@@ -2619,6 +2619,25 @@ app.post("/support/:id/reply", requireAuth, async (req, res) => {
   }
 });
 
+app.delete("/support/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Verify ownership
+    const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id").eq("id", id).single();
+    if (!ticket || ticket.user_id !== req.authUser.id) {
+      return res.status(404).json({ error: "Bilet tapılmadı" });
+    }
+
+    // Delete ticket (cascade should delete messages, or doing it manually)
+    await supabaseAdmin.from("support_messages").delete().eq("ticket_id", id);
+    await supabaseAdmin.from("support_tickets").delete().eq("id", id);
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // Admin Support Routes
 
 app.get("/admin/support", requireAdmin, async (req, res) => {
