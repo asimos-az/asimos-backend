@@ -2592,6 +2592,21 @@ app.get("/support", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/support/stats", requireAuth, async (req, res) => {
+  try {
+    const { count, error } = await supabaseAdmin
+      .from("support_tickets")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", req.authUser.id)
+      .eq("is_answered", true);
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ answeredCount: count || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/support/:id/reply", requireAuth, async (req, res) => {
   try {
     const { message } = req.body || {};
@@ -2616,6 +2631,22 @@ app.post("/support/:id/reply", requireAuth, async (req, res) => {
     // Update status to open if it was closed or replied
     await supabaseAdmin.from("support_tickets").update({ status: "open", is_answered: false }).eq("id", id);
 
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/support/:id/read", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabaseAdmin
+      .from("support_tickets")
+      .update({ is_answered: false })
+      .eq("id", id)
+      .eq("user_id", req.authUser.id);
+
+    if (error) return res.status(400).json({ error: error.message });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -2738,8 +2769,8 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
         data: { type: "support", ticketId: id }
       });
 
-      if (msgs.length) sendExpoPush(msgs).catch(() => { });
-      if (history.length) insertNotifications(history).catch(() => { });
+      if (msgs.length) await sendExpoPush(msgs).catch(() => { });
+      if (history.length) await insertNotifications(history).catch(() => { });
     }
 
     return res.json({ ok: true });

@@ -138,6 +138,10 @@ alter table public.jobs
 create index if not exists jobs_boosted_until_idx on public.jobs (boosted_until desc);
 
 
+-- Job Branding
+alter table public.jobs
+  add column if not exists company_name text;
+
 -- JOB ALERTS (İş Bildirişləri)
 CREATE TABLE IF NOT EXISTS public.job_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
