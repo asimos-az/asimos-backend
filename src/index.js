@@ -678,8 +678,9 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
     const reason = reasonRaw ? String(reasonRaw).trim() : "Admin tərəfindən silindi";
 
     // 1. Fetch user info before deletion for email
-    const { data: profile } = await supabaseAdmin.from("profiles").select("full_name, email").eq("id", id).maybeSingle();
-    const userEmail = profile?.email;
+    const { data: profile } = await supabaseAdmin.from("profiles").select("full_name").eq("id", id).maybeSingle();
+    const { data: authData } = await supabaseAdmin.auth.admin.getUserById(id);
+    const userEmail = authData?.user?.email;
     const userFullName = profile?.full_name || "İstifadəçi";
 
     // 2. Perform deletion
