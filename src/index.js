@@ -59,9 +59,9 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
       text: `Salam ${fullName},\n\nHesabınız admin tərəfindən silindi.\n\nSəbəb: ${reason}\n\nHörmətlə,\nAsimos Komandası`,
       html: `<p>Salam <b>${fullName}</b>,</p><p>Hesabınız admin tərəfindən silindi.</p><p><b>Səbəb:</b> ${reason}</p><p>Hörmətlə,<br>Asimos Komandası</p>`,
     });
-    console.log("Deletion email sent:", info.messageId);
+    console.log("Deletion email sent successfully to:", toEmail, "MessageId:", info.messageId);
   } catch (e) {
-    console.error("Deletion email error:", e);
+    console.error("CRITICAL: Deletion email failed for:", toEmail, "Error:", e.message);
   }
 }
 
@@ -677,24 +677,38 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
     const { reason: reasonRaw } = req.body || {};
     const reason = reasonRaw ? String(reasonRaw).trim() : "Admin tərəfindən silindi";
 
-    // 1. Fetch user info before deletion for email
+    // 1. Fetch user info before deletion
+    console.log(`[Admin] Deleting user ${id}. Reason: ${reason}`);
     const { data: profile } = await supabaseAdmin.from("profiles").select("full_name").eq("id", id).maybeSingle();
-    const { data: authData } = await supabaseAdmin.auth.admin.getUserById(id);
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.getUserById(id);
+    
+    if (authError) console.warn(`[Admin] Could not fetch auth user for ${id}:`, authError.message);
+    
     const userEmail = authData?.user?.email;
     const userFullName = profile?.full_name || "İstifadəçi";
 
-    // 2. Perform deletion
-    await supabaseAdmin.from("profiles").delete().eq("id", id);
-    try { await supabaseAdmin.auth.admin.deleteUser(id); } catch { }
-
-    // 3. Send notification email
+    // 2. Send notification email FIRST (while user still exists)
     if (userEmail) {
-      sendDeletionEmail(userEmail, userFullName, reason).catch(e => console.error("Async email error:", e));
+      console.log(`[Admin] Sending deletion email to ${userEmail}...`);
+      await sendDeletionEmail(userEmail, userFullName, reason);
+    } else {
+      console.warn(`[Admin] No email found for user ${id}, skipping notification.`);
+    }
+
+    // 3. Perform actual deletion
+    console.log(`[Admin] Removing user ${id} from DB and Auth...`);
+    await supabaseAdmin.from("profiles").delete().eq("id", id);
+    try { 
+      const { error: delError } = await supabaseAdmin.auth.admin.deleteUser(id); 
+      if (delError) console.error(`[Admin] Auth deletion failed for ${id}:`, delError.message);
+    } catch (e) {
+      console.error(`[Admin] Auth deletion exception for ${id}:`, e.message);
     }
 
     await logEvent("admin_user_deleted", null, { target_user_id: id, reason });
     return res.json({ ok: true });
   } catch (e) {
+    console.error("[Admin] User deletion route error:", e);
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
