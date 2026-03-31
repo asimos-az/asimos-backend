@@ -45,6 +45,26 @@ async function sendApprovalEmail(toEmail, fullName) {
   }
 }
 
+async function sendDeletionEmail(toEmail, fullName, reason) {
+  console.log(`Attempting to send deletion email to ${toEmail}`);
+  if (!SMTP_HOST || !SMTP_USER) {
+    console.error("SMTP config missing:", { SMTP_HOST, SMTP_USER });
+    return;
+  }
+  try {
+    const info = await mailer.sendMail({
+      from: SMTP_FROM,
+      to: toEmail,
+      subject: "ASIMOS - Hesabınız Silindi",
+      text: `Salam ${fullName},\n\nHesabınız admin tərəfindən silindi.\n\nSəbəb: ${reason}\n\nHörmətlə,\nAsimos Komandası`,
+      html: `<p>Salam <b>${fullName}</b>,</p><p>Hesabınız admin tərəfindən silindi.</p><p><b>Səbəb:</b> ${reason}</p><p>Hörmətlə,<br>Asimos Komandası</p>`,
+    });
+    console.log("Deletion email sent:", info.messageId);
+  } catch (e) {
+    console.error("Deletion email error:", e);
+  }
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -654,11 +674,24 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
 app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
+    const { reason: reasonRaw } = req.body || {};
+    const reason = reasonRaw ? String(reasonRaw).trim() : "Admin tərəfindən silindi";
 
+    // 1. Fetch user info before deletion for email
+    const { data: profile } = await supabaseAdmin.from("profiles").select("full_name, email").eq("id", id).maybeSingle();
+    const userEmail = profile?.email;
+    const userFullName = profile?.full_name || "İstifadəçi";
+
+    // 2. Perform deletion
     await supabaseAdmin.from("profiles").delete().eq("id", id);
     try { await supabaseAdmin.auth.admin.deleteUser(id); } catch { }
 
-    await logEvent("admin_user_deleted", null, { target_user_id: id });
+    // 3. Send notification email
+    if (userEmail) {
+      sendDeletionEmail(userEmail, userFullName, reason).catch(e => console.error("Async email error:", e));
+    }
+
+    await logEvent("admin_user_deleted", null, { target_user_id: id, reason });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
