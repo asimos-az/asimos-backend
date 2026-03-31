@@ -1886,8 +1886,9 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     let items = (data || []).map((r) => {
       const expiresMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
       const createdMs = r.created_at ? new Date(r.created_at).getTime() : null;
-      if (expiresMs !== null && expiresMs <= nowMs) return null;
-      if (expiresMs === null && (r.is_daily === false || r.is_daily === null) && createdMs !== null && createdMs <= (nowMs - 28 * MS_DAY)) return null;
+      const status = (r.status || "open");
+      if (status !== 'closed' && expiresMs !== null && expiresMs <= nowMs) return null;
+      if (status !== 'closed' && expiresMs === null && (r.is_daily === false || r.is_daily === null) && createdMs !== null && createdMs <= (nowMs - 28 * MS_DAY)) return null;
 
       const loc = {
         lat: (typeof r.location_lat === "number" ? r.location_lat : toNum(r.location_lat)),
@@ -2035,7 +2036,11 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       }
     }
 
-    if ((!profile || profile?.role === "seeker") && String(job.status || "open").toLowerCase() === "closed") {
+    const isAdmin = req.authUser?.is_admin;
+    const isCreator = req.authUser?.id === data.created_by;
+    const isClosed = String(job.status || "open").toLowerCase() === "closed";
+
+    if (!isAdmin && !isCreator && (!profile || profile?.role === "seeker") && isClosed) {
       return res.status(404).json({ error: "Not found" });
     }
 
