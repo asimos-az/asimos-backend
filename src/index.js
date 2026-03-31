@@ -804,6 +804,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       location_lng: patch.location_lng,
       location_address: patch.location_address,
       status: patch.status,
+      rejection_reason: patch.rejection_reason,
       company_name: (patch.company_name || patch.companyName) ? String(patch.company_name || patch.companyName).trim() : undefined,
       duration_days: patch.duration_days !== undefined ? (patch.duration_days ? Number(patch.duration_days) : null) : undefined,
       starts_at: patch.starts_at !== undefined ? (patch.starts_at ? new Date(patch.starts_at).toISOString() : null) : undefined,
@@ -811,11 +812,56 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
     };
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
-    const { data, error } = await supabaseAdmin.from("jobs").update(allowed).eq("id", id).select("*").single();
+    const { data: updatedJob, error } = await supabaseAdmin.from("jobs").update(allowed).eq("id", id).select("*").single();
     if (error) return res.status(400).json({ error: error.message });
 
+    // Handle Notifications for Status Changes (Pending -> Open / Pending -> Rejected)
+    if (patch.status === "rejected" || patch.status === "open") {
+      try {
+        const creatorId = updatedJob.created_by;
+        if (creatorId) {
+          const isRejected = patch.status === "rejected";
+          const title = isRejected ? "Elanınız rədd edildi" : "Elanınız təsdiqləndi";
+          const reasonHtml = patch.rejection_reason ? `\nSəbəb: ${patch.rejection_reason}` : "";
+          const body = isRejected 
+            ? `"${updatedJob.title}" adlı elanınız təəssüf ki, təsdiqlənmədi.${reasonHtml}`
+            : `Təbriklər! "${updatedJob.title}" adlı elanınız artıq aktivdir.`;
+
+          const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", creatorId);
+          
+          const pushMsgs = [];
+          if (userTokens) {
+            for (const t of userTokens) {
+              if (t.expo_push_token) {
+                pushMsgs.push({
+                  to: t.expo_push_token,
+                  title,
+                  body,
+                  data: { type: "job_status", jobId: id, status: patch.status },
+                  sound: "default"
+                });
+              }
+            }
+          }
+
+          if (pushMsgs.length) {
+            await sendExpoPush(pushMsgs).catch(e => console.error("[Job Notify] Push Error:", e));
+          }
+
+          await insertNotifications([{
+            user_id: creatorId,
+            title,
+            body,
+            data: { type: "job_status", jobId: id, status: patch.status }
+          }]).catch(e => console.error("[Job Notify] DB Error:", e));
+        }
+      } catch (e) {
+        console.error("[Job Notify] Error:", e);
+      }
+    }
+
     await logEvent("admin_job_updated", null, { job_id: id, patch: allowed });
-    return res.json({ ok: true, job: data });
+    return res.json({ ok: true, job: updatedJob });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -1965,6 +2011,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       createdAt: data.created_at,
       createdBy: data.created_by,
       status: (data.status || "open"),
+      rejectionReason: data.rejection_reason || null,
       closedAt: (data.closed_at ?? null),
       closedReason: (data.closed_reason ?? null),
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
@@ -2070,8 +2117,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    let initialStatus = "open"; // Always open for now to fix visibility issues
-    // let initialStatus = (existingJobsCount || 0) > 0 ? "open" : "pending";
+    let initialStatus = "pending"; 
     if (req.authUser.is_admin || req.authUser.role === "admin") {
       initialStatus = "open";
     }
@@ -2147,6 +2193,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       createdAt: data.created_at,
       createdBy: data.created_by,
       status: (data.status || "open"),
+      rejectionReason: data.rejection_reason || null,
       closedAt: (data.closed_at ?? null),
       closedReason: (data.closed_reason ?? null),
       location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address },
