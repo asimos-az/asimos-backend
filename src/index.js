@@ -65,6 +65,10 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
   }
 }
 
+const app = express();
+app.use(cors());
+app.use(express.json());
+
 app.get("/admin/debug-smtp", (req, res) => {
   res.json({
     SMTP_HOST: SMTP_HOST ? "Configured (" + SMTP_HOST + ")" : "MISSING",
@@ -75,10 +79,6 @@ app.get("/admin/debug-smtp", (req, res) => {
     NODE_ENV: process.env.NODE_ENV
   });
 });
-
-const app = express();
-app.use(cors());
-app.use(express.json());
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
