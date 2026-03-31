@@ -417,7 +417,8 @@ function computeExpiresAt(jobType, durationDays) {
 async function cleanupExpiredJobs() {
   try {
     const nowIso = new Date().toISOString();
-    await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso);
+    // Only delete open/pending jobs that expired. Keep closed/rejected/etc.
+    await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso).in("status", ["open", "pending"]);
 
     const cutoffIso = new Date(Date.now() - 28 * MS_DAY).toISOString();
     await supabaseAdmin.from("jobs").delete().is("expires_at", null).eq("is_daily", false).lte("created_at", cutoffIso);
@@ -2256,7 +2257,6 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
       status: "closed",
       closed_at: nowIso,
       closed_reason: reason,
-      expires_at: nowIso,
     };
 
     let updated = null;
@@ -2274,7 +2274,7 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
       if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
         const r2 = await supabaseAdmin
           .from("jobs")
-          .update({ expires_at: nowIso })
+          .update({ closed_at: nowIso })
           .eq("id", id)
           .select("*")
           .single();
@@ -2337,7 +2337,6 @@ app.patch("/job/:id/close", requireAuth, async (req, res) => {
       status: "closed",
       closed_at: nowIso,
       closed_reason: reason,
-      expires_at: nowIso,
     };
 
     let updated = null;
@@ -2354,7 +2353,7 @@ app.patch("/job/:id/close", requireAuth, async (req, res) => {
       if (/column .*\b(status|closed_at|closed_reason)\b/i.test(msg)) {
         const r2 = await supabaseAdmin
           .from("jobs")
-          .update({ expires_at: nowIso })
+          .update({ closed_at: nowIso })
           .eq("id", id)
           .select("*")
           .single();
