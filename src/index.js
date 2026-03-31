@@ -65,6 +65,17 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
   }
 }
 
+app.get("/admin/debug-smtp", (req, res) => {
+  res.json({
+    SMTP_HOST: SMTP_HOST ? "Configured (" + SMTP_HOST + ")" : "MISSING",
+    SMTP_USER: SMTP_USER ? "Configured (" + SMTP_USER + ")" : "MISSING",
+    SMTP_PASS: SMTP_PASS ? "Configured" : "MISSING",
+    SMTP_FROM,
+    SMTP_PORT,
+    NODE_ENV: process.env.NODE_ENV
+  });
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -682,6 +693,8 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
     const { data: profile } = await supabaseAdmin.from("profiles").select("full_name").eq("id", id).maybeSingle();
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.getUserById(id);
     
+    console.log(`[Admin] Auth user data for ${id}:`, JSON.stringify(authData));
+
     if (authError) console.warn(`[Admin] Could not fetch auth user for ${id}:`, authError.message);
     
     const userEmail = authData?.user?.email;
