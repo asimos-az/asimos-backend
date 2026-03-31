@@ -742,10 +742,9 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lat: Number.isFinite(location_lat) ? location_lat : null,
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
-      location_address: body.location_address ? String(body.location_address) : null,
-      location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
       job_type: "permanent", // Default for admin created jobs to ensure visibility
+      company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
     };
 
     if (emp.average_rating && emp.average_rating >= 4.8) {
@@ -802,6 +801,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       location_lng: patch.location_lng,
       location_address: patch.location_address,
       status: patch.status,
+      company_name: (patch.company_name || patch.companyName) ? String(patch.company_name || patch.companyName).trim() : undefined,
     };
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
@@ -2018,6 +2018,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       durationDays,
       notifyRadiusM,
       location,
+      company_name,
+      companyName,
     } = req.body || {};
 
     if (!title) return res.status(400).json({ error: "Title required" });
@@ -2087,6 +2089,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location_lat: locLat,
       location_lng: locLng,
       location_address: locAddr,
+      company_name: (company_name || companyName) ? String(company_name || companyName).trim() : null,
     };
 
     let data = null;
