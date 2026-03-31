@@ -743,7 +743,10 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
-      job_type: "permanent", // Default for admin created jobs to ensure visibility
+      job_type: is_daily ? "temporary" : "permanent",
+      duration_days: body.duration_days ? Number(body.duration_days) : (is_daily ? 1 : null),
+      starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
+      working_hours: body.working_hours ? String(body.working_hours).trim() : null,
       company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
     };
 
@@ -802,6 +805,9 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       location_address: patch.location_address,
       status: patch.status,
       company_name: (patch.company_name || patch.companyName) ? String(patch.company_name || patch.companyName).trim() : undefined,
+      duration_days: patch.duration_days !== undefined ? (patch.duration_days ? Number(patch.duration_days) : null) : undefined,
+      starts_at: patch.starts_at !== undefined ? (patch.starts_at ? new Date(patch.starts_at).toISOString() : null) : undefined,
+      working_hours: patch.working_hours !== undefined ? (patch.working_hours ? String(patch.working_hours).trim() : null) : undefined,
     };
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
