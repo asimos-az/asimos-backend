@@ -2795,6 +2795,17 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
   }
 });
 
+app.delete("/admin/support/:id", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabaseAdmin.from("support_tickets").delete().eq("id", id);
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 
 app.listen(PORT, () => {
 });
