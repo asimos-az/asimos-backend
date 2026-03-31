@@ -2738,9 +2738,11 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
     // 3. Notify User
     const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id, subject").eq("id", id).single();
     if (ticket?.user_id) {
+      console.log(`[Support Notify] Preparing for user: ${ticket.user_id}`);
       const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", ticket.user_id);
+      console.log(`[Support Notify] Found tokens: ${userTokens?.length || 0}`);
 
-      const title = "Dəstək Mərkəzi";
+      const title = "Dəstək Cavabı";
       const body = `Sizin müraciətinizə cavab gəldi: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`;
 
       const msgs = [];
@@ -2769,8 +2771,16 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
         data: { type: "support", ticketId: id }
       });
 
-      if (msgs.length) await sendExpoPush(msgs).catch(() => { });
-      if (history.length) await insertNotifications(history).catch(() => { });
+      if (msgs.length) {
+          console.log(`[Support Notify] Sending Expo Push with ${msgs.length} messages...`);
+          await sendExpoPush(msgs).catch((e) => console.error("[Support Notify] Expo Error:", e));
+      } else {
+          console.log(`[Support Notify] NO PUSH TOKENS FOUND for user ${ticket.user_id}`);
+      }
+      if (history.length) {
+          console.log(`[Support Notify] Inserting DB Notification...`);
+          await insertNotifications(history).catch((e) => console.error("[Support Notify] DB Error:", e));
+      }
     }
 
     return res.json({ ok: true });
