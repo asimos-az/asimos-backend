@@ -810,6 +810,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
       working_hours: body.working_hours ? String(body.working_hours).trim() : null,
       company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
+      published_at: body.published_at ? new Date(body.published_at).toISOString() : null,
     };
 
     if (emp.average_rating && emp.average_rating >= 4.8) {
@@ -871,6 +872,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       duration_days: patch.duration_days !== undefined ? (patch.duration_days ? Number(patch.duration_days) : null) : undefined,
       starts_at: patch.starts_at !== undefined ? (patch.starts_at ? new Date(patch.starts_at).toISOString() : null) : undefined,
       working_hours: patch.working_hours !== undefined ? (patch.working_hours ? String(patch.working_hours).trim() : null) : undefined,
+      published_at: patch.published_at !== undefined ? (patch.published_at ? new Date(patch.published_at).toISOString() : null) : undefined,
     };
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
@@ -1902,6 +1904,10 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       // MOD: Show both open and pending for visibility
       // query = query.eq("status", "open");
       query = query.in("status", ["open", "pending"]);
+      
+      // New: Scheduled Publishing Filter
+      const nowIso = new Date().toISOString();
+      query = query.or(`published_at.is.null,published_at.lte.${nowIso}`);
 
       if (jobTypeFilter === "seeker") {
         query = query.eq("job_type", "seeker");
@@ -3057,11 +3063,13 @@ async function checkGeofenceAndNotify(userId, lat, lng) {
     if (nlat === null || nlng === null) return;
 
     // 1. Fetch latest open jobs that have a location and radius
+    const nowIso = new Date().toISOString();
     const { data: jobs, error } = await supabaseAdmin
       .from("jobs")
-      .select("id, title, wage, location_lat, location_lng, notify_radius_m, created_by")
+      .select("id, title, wage, location_lat, location_lng, notify_radius_m, created_by, published_at")
       .eq("status", "open")
-      .not("location_lat", "is", null);
+      .not("location_lat", "is", null)
+      .or(`published_at.is.null,published_at.lte.${nowIso}`);
 
     if (error || !jobs || jobs.length === 0) return;
 
