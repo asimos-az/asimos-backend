@@ -1506,6 +1506,12 @@ app.patch("/me/location", requireAuth, async (req, res) => {
 
     const profile = await getProfile(req.authUser.id);
     await logEvent("location_update", req.authUser.id, { location: loc });
+
+    // New: Reactive Geofencing
+    if (profile?.role === "seeker") {
+      checkGeofenceAndNotify(req.authUser.id, loc.lat, loc.lng).catch(() => { });
+    }
+
     return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -3041,6 +3047,90 @@ async function notifyNearbySeekers(job) {
 
   } catch (e) {
     console.error("notifyNearbySeekers error:", e);
+  }
+}
+
+async function checkGeofenceAndNotify(userId, lat, lng) {
+  try {
+    const nlat = toNum(lat);
+    const nlng = toNum(lng);
+    if (nlat === null || nlng === null) return;
+
+    // 1. Fetch latest open jobs that have a location and radius
+    const { data: jobs, error } = await supabaseAdmin
+      .from("jobs")
+      .select("id, title, wage, location_lat, location_lng, notify_radius_m, created_by")
+      .eq("status", "open")
+      .not("location_lat", "is", null);
+
+    if (error || !jobs || jobs.length === 0) return;
+
+    const pushMessages = [];
+    const dbNotifications = [];
+
+    // 2. Clear out self-notifications (don't notify employers of their own jobs)
+    const otherJobs = jobs.filter(j => j.created_by !== userId);
+    if (otherJobs.length === 0) return;
+
+    // 3. Fetch user's push tokens
+    const { data: userTokens } = await supabaseAdmin
+      .from("push_tokens")
+      .select("expo_push_token")
+      .eq("user_id", userId);
+
+    for (const job of otherJobs) {
+      const radiusM = toNum(job.notify_radius_m) || 5000;
+      const dist = haversineDistanceM(nlat, nlng, job.location_lat, job.location_lng);
+
+      if (dist <= radiusM) {
+        // 4. Check if already notified for THIS job
+        // Note: we use @> operator via JSONB filter
+        const { data: existing, error: e2 } = await supabaseAdmin
+          .from("notifications")
+          .select("id")
+          .eq("user_id", userId)
+          .contains("data", { jobId: job.id })
+          .limit(1);
+
+        if (e2) continue;
+
+        if (!existing || existing.length === 0) {
+          const title = "Yaxınlıqda elan!";
+          const body = `Sizin ərazidə vakansiya var: ${job.title}`;
+          const dataPayload = { type: "job", jobId: job.id, source: "geofence" };
+
+          dbNotifications.push({
+            user_id: userId,
+            title,
+            body,
+            data: dataPayload,
+          });
+
+          if (userTokens) {
+            for (const t of userTokens) {
+              if (t.expo_push_token && t.expo_push_token.startsWith("ExponentPushToken")) {
+                pushMessages.push({
+                  to: t.expo_push_token,
+                  title,
+                  body,
+                  data: dataPayload,
+                  sound: "default"
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (dbNotifications.length > 0) {
+      await supabaseAdmin.from("notifications").insert(dbNotifications);
+    }
+    if (pushMessages.length > 0) {
+      await sendExpoPush(pushMessages);
+    }
+  } catch (e) {
+    console.error("[Geofence] Error:", e.message);
   }
 }
 
