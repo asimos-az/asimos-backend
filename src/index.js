@@ -224,6 +224,16 @@ async function logEvent(type, actorId, metadata) {
         `📂 <b>Kateqoriya:</b> ${meta.category || "Ümumi"}\n` +
         `❓ <b>Mövzu:</b> ${meta.subject}\n` +
         `💬 <b>Mesaj:</b>\n${meta.message}`;
+    } else if (type === "user_self_deleted") {
+      msg = `🗑️ <b>Hesab Silindi (İstifadəçi)</b>\n\n` +
+        `👤 <b>Ad:</b> ${meta.fullName || "Məlum deyil"}\n` +
+        `📧 <b>Email:</b> ${meta.email || "Məlum deyil"}\n` +
+        `💼 <b>Rol:</b> ${meta.role || "Məlum deyil"}\n` +
+        `💬 <b>Səbəb:</b> ${meta.reason || "Qeyd olunmayıb"}`;
+    } else if (type === "admin_user_deleted") {
+      msg = `🛡️ <b>Hesab Silindi (Admin tərəfindən)</b>\n\n` +
+        `👤 <b>Hədəf ID:</b> ${meta.target_user_id}\n` +
+        `💬 <b>Səbəb:</b> ${meta.reason || "Admin tərəfindən silindi"}`;
     }
 
     if (msg) await sendTelegram(msg);
@@ -1839,7 +1849,12 @@ app.delete("/me/account", requireAuth, async (req, res) => {
     const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(id);
     if (authErr) console.error(`[Self-Delete] Auth deletion error for ${id}:`, authErr.message);
 
-    await logEvent("user_self_deleted", id, { reason, role: profile?.role });
+    await logEvent("user_self_deleted", id, { 
+      reason, 
+      fullName: userFullName, 
+      email: userEmail, 
+      role: profile?.role 
+    });
 
     return res.json({ ok: true, message: "Hesabınız uğurla silindi" });
   } catch (e) {
