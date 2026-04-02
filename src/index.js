@@ -1822,7 +1822,7 @@ app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
 
 app.delete("/me/account", requireAuth, async (req, res) => {
   try {
-    const id = req.user.id;
+    const id = req.authUser.id;
     const { reason: reasonRaw } = req.body || {};
     const reason = reasonRaw ? String(reasonRaw).trim() : "Öz istəyi ilə sildi";
 
