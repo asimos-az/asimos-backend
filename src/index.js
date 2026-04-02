@@ -45,6 +45,22 @@ async function sendApprovalEmail(toEmail, fullName) {
   }
 }
 
+async function sendSelfDeletionAdminEmail(userEmail, fullName, reason) {
+  console.log(`Notifying admin about self-deletion of ${userEmail}`);
+  if (!SMTP_HOST || !SMTP_USER) return;
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: SMTP_USER, // Send to the admin (usually SMTP_USER)
+      subject: `ASIMOS - Hesab Silinməsi: ${fullName}`,
+      text: `İstifadəçi öz hesabını sildi.\n\nAd: ${fullName}\nEmail: ${userEmail}\nSəbəb: ${reason}`,
+      html: `<h3>İstifadəçi öz hesabını sildi</h3><p><b>Ad:</b> ${fullName}</p><p><b>Email:</b> ${userEmail}</p><p><b>Səbəb:</b> ${reason}</p>`,
+    });
+  } catch (e) {
+    console.error("Admin notification email failed:", e.message);
+  }
+}
+
 async function sendDeletionEmail(toEmail, fullName, reason) {
   console.log(`Attempting to send deletion email to ${toEmail}`);
   if (!SMTP_HOST || !SMTP_USER) {
@@ -1793,6 +1809,44 @@ app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
   }
 });
 
+
+app.delete("/me/account", requireAuth, async (req, res) => {
+  try {
+    const id = req.user.id;
+    const { reason: reasonRaw } = req.body || {};
+    const reason = reasonRaw ? String(reasonRaw).trim() : "Öz istəyi ilə sildi";
+
+    // 1. Fetch user info before deletion
+    const { data: profile } = await supabaseAdmin.from("profiles").select("full_name, role").eq("id", id).maybeSingle();
+    const { data: authData } = await supabaseAdmin.auth.admin.getUserById(id);
+    
+    const userEmail = authData?.user?.email;
+    const userFullName = profile?.full_name || "İstifadəçi";
+
+    console.log(`[Self-Delete] User ${id} (${userEmail}) is deleting their account. Reason: ${reason}`);
+
+    // 2. Notify Admin
+    await sendSelfDeletionAdminEmail(userEmail || "Bilinmir", userFullName, reason);
+
+    // 3. Optional: Send farewell email to user
+    if (userEmail) {
+        await sendDeletionEmail(userEmail, userFullName, reason);
+    }
+
+    // 4. Perform deletion
+    // Cascade handles jobs, notifications, etc. (from previous migration)
+    await supabaseAdmin.from("profiles").delete().eq("id", id);
+    const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(id);
+    if (authErr) console.error(`[Self-Delete] Auth deletion error for ${id}:`, authErr.message);
+
+    await logEvent("user_self_deleted", id, { reason, role: profile?.role });
+
+    return res.json({ ok: true, message: "Hesabınız uğurla silindi" });
+  } catch (e) {
+    console.error("[Self-Delete] Error:", e);
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
 
 app.get("/me/alerts", requireAuth, async (req, res) => {
   try {
