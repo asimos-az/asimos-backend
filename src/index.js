@@ -2221,6 +2221,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location,
       company_name,
       companyName,
+      published_at,
+      publishedAt,
     } = req.body || {};
 
     if (!title) return res.status(400).json({ error: "Title required" });
@@ -2290,6 +2292,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location_lng: locLng,
       location_address: locAddr,
       company_name: (company_name || companyName) ? String(company_name || companyName).trim() : null,
+      published_at: (published_at || publishedAt) ? new Date(published_at || publishedAt).toISOString() : null,
     };
 
     let data = null;
