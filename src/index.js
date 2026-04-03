@@ -2696,7 +2696,12 @@ function getDistanceM(lat1, lon1, lat2, lon2) {
 
 async function processJobAlerts(job) {
   try {
-    const { data: alerts, error } = await supabaseAdmin.from("job_alerts").select("*");
+    // Only notify users with role 'seeker'
+    const { data: alerts, error } = await supabaseAdmin
+      .from("job_alerts")
+      .select("*, profiles!inner(role)")
+      .eq("profiles.role", "seeker");
+
     if (error || !alerts?.length) return;
 
     const queueItems = [];
@@ -2708,9 +2713,7 @@ async function processJobAlerts(job) {
       if (alert.user_id === job.created_by) continue;
 
       if (alert.job_type && alert.job_type !== job.job_type) continue;
-
       if (alert.category && alert.category !== job.category) continue;
-
 
       if (alert.min_wage && (job.wage || 0) < alert.min_wage) continue;
       if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
@@ -2719,9 +2722,14 @@ async function processJobAlerts(job) {
         if (!jobTxt.includes(alert.query.toLowerCase())) continue;
       }
 
-      if (alert.location_lat && alert.location_lng && alert.radius_m) {
+      if (alert.location_lat && alert.location_lng) {
         const dist = getDistanceM(alert.location_lat, alert.location_lng, jobLat, jobLng);
-        if (dist > alert.radius_m) continue;
+        const seekerRadius = toNum(alert.radius_m) || 0;
+        const employerRadius = toNum(job.notify_radius_m) || 0;
+        
+        // Notify if within seeker's preference OR employer's broadcast radius
+        const effectiveRadius = Math.max(seekerRadius, employerRadius);
+        if (effectiveRadius > 0 && dist > effectiveRadius) continue;
       }
 
       queueItems.push({
