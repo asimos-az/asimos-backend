@@ -853,7 +853,7 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
 
     let query = supabaseAdmin
       .from("jobs")
-      .select("*, ratings!job_id(count)")
+      .select("*, ratings!job_id(count), profiles!created_by(full_name)")
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
