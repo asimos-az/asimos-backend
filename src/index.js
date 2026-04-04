@@ -357,7 +357,7 @@ async function notifyNearbyEmployers(alert, seekerName) {
     // Note: We use ilike for flexible matching. Real prod might use exact slug match.
     const { data: employers, error } = await supabaseAdmin
       .from("profiles")
-      .select("id, full_name, location, expo_push_token, company_name")
+      .select("id, full_name, location, expo_push_token, company_name, notif_sound_enabled, notif_sound_name")
       .eq("role", "employer")
       .ilike("category", `%${category}%`);
 
@@ -381,13 +381,14 @@ async function notifyNearbyEmployers(alert, seekerName) {
 
         const userToken = emp.expo_push_token;
 
+        const sound = (emp.notif_sound_enabled ?? true) ? (emp.notif_sound_name || "default") : null;
         if (userToken && String(userToken).startsWith("ExponentPushToken")) {
           pushMessages.push({
             to: userToken,
             title,
             body,
             data: dataPayload,
-            sound: "default",
+            sound,
             priority: "high"
           });
         }
@@ -494,6 +495,8 @@ function profileToUser(profile, authUser) {
     email: authUser?.email || null,
     phone: profile?.phone || null,
     location: profile?.location || null,
+    notifSoundEnabled: profile?.notif_sound_enabled ?? true,
+    notifSoundName: profile?.notif_sound_name || "default",
   };
 }
 
@@ -1540,6 +1543,75 @@ app.patch("/me/location", requireAuth, async (req, res) => {
       checkGeofenceAndNotify(req.authUser.id, loc.lat, loc.lng).catch(() => { });
     }
 
+    return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/me/name", requireAuth, async (req, res) => {
+  try {
+    const { fullName } = req.body || {};
+    if (!fullName || typeof fullName !== "string" || fullName.trim().length < 2) {
+      return res.status(400).json({ error: "Düzgün ad daxil edin" });
+    }
+
+    const { error } = await supabaseAdmin
+      .from("profiles")
+      .update({ full_name: fullName.trim() })
+      .eq("id", req.authUser.id);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const profile = await getProfile(req.authUser.id);
+    await logEvent("name_update", req.authUser.id, { fullName: fullName.trim() });
+
+    return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+app.patch("/me/phone", requireAuth, async (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone || typeof phone !== "string" || phone.length < 5) {
+      return res.status(400).json({ error: "Düzgün telefon nömrəsi daxil edin" });
+    }
+
+    const { error } = await supabaseAdmin
+      .from("profiles")
+      .update({ phone })
+      .eq("id", req.authUser.id);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const profile = await getProfile(req.authUser.id);
+    await logEvent("phone_update", req.authUser.id, { phone });
+
+    return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+app.patch("/me/notifications", requireAuth, async (req, res) => {
+  try {
+    const { soundEnabled, soundName } = req.body || {};
+    const updates = {};
+    if (typeof soundEnabled === "boolean") updates.notif_sound_enabled = soundEnabled;
+    if (typeof soundName === "string") updates.notif_sound_name = soundName;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const { error } = await supabaseAdmin
+      .from("profiles")
+      .update(updates)
+      .eq("id", req.authUser.id);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const profile = await getProfile(req.authUser.id);
     return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -2958,6 +3030,9 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
       const msgs = [];
       const history = [];
 
+      const { data: prof } = await supabaseAdmin.from("profiles").select("notif_sound_enabled, notif_sound_name").eq("id", ticket.user_id).maybeSingle();
+      const sound = (prof?.notif_sound_enabled ?? true) ? (prof?.notif_sound_name || "default") : null;
+
       // Send to tokens
       if (userTokens) {
         for (const t of userTokens) {
@@ -2967,7 +3042,7 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
               title,
               body,
               data: { type: "support", ticketId: id },
-              sound: "default"
+              sound
             });
           }
         }
@@ -3043,7 +3118,7 @@ async function notifyNearbySeekers(job) {
     // Optimisation: We fetch minimal fields
     const { data: seekers, error } = await supabaseAdmin
       .from("profiles")
-      .select("id, location, expo_push_token")
+      .select("id, location, expo_push_token, notif_sound_enabled, notif_sound_name")
       .eq("role", "seeker")
       .not("location", "is", null);
 
@@ -3096,6 +3171,9 @@ async function notifyNearbySeekers(job) {
     for (const [userId, tokens] of tokenMap) {
       if (userId === job.createdBy) continue; // Don't notify self
 
+      const seeker = validSeekers.find(s => s.id === userId);
+      const sound = (seeker?.notif_sound_enabled ?? true) ? (seeker?.notif_sound_name || "default") : null;
+
       const dataPayload = { type: "job", jobId: job.id };
 
       // DB Notification
@@ -3115,7 +3193,7 @@ async function notifyNearbySeekers(job) {
             title,
             body,
             data: dataPayload,
-            sound: "default"
+            sound
           });
         }
       }
@@ -3187,12 +3265,29 @@ async function checkGeofenceAndNotify(userId, lat, lng) {
           const body = `Sizin ərazidə vakansiya var: ${job.title}`;
           const dataPayload = { type: "job", jobId: job.id, source: "geofence" };
 
+          const { data: prof } = await supabaseAdmin.from("profiles").select("notif_sound_enabled, notif_sound_name").eq("id", userId).maybeSingle();
+          const sound = (prof?.notif_sound_enabled ?? true) ? (prof?.notif_sound_name || "default") : null;
+
           dbNotifications.push({
             user_id: userId,
             title,
             body,
             data: dataPayload,
           });
+
+          if (userTokens) {
+            for (const t of userTokens) {
+              if (t.expo_push_token) {
+                pushMessages.push({
+                  to: t.expo_push_token,
+                  title,
+                  body,
+                  data: dataPayload,
+                  sound
+                });
+              }
+            }
+          }
 
           if (userTokens) {
             for (const t of userTokens) {
