@@ -616,6 +616,48 @@ async function optionalAuth(req, res, next) {
   }
 }
 
+async function requireAnyAuth(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    // 1. Try Admin Token
+    const adminPayload = verifyAdminToken(token);
+    if (adminPayload) {
+      // Find the actual UUID from profiles if possible
+      let profileId = "admin";
+      try {
+        const { data: p } = await supabaseAdmin
+          .from("profiles")
+          .select("id")
+          .eq("email", adminPayload.email)
+          .single();
+        if (p?.id) profileId = p.id;
+      } catch (e) {}
+
+      req.authUser = {
+        id: profileId,
+        email: adminPayload.email,
+        role: "admin",
+        is_admin: true
+      };
+      req.accessToken = token;
+      return next();
+    }
+
+    // 2. Try Supabase Token
+    const { data, error } = await supabaseAnon.auth.getUser(token);
+    if (error || !data?.user) return res.status(401).json({ error: "Invalid token" });
+
+    req.authUser = data.user;
+    req.accessToken = token;
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+}
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 app.post("/admin/login", async (req, res) => {
   try {
@@ -1874,7 +1916,7 @@ app.post("/auth/reset-password", async (req, res) => {
 });
 
 
-app.get("/me/notifications", requireAuth, async (req, res) => {
+app.get("/me/notifications", requireAnyAuth, async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
@@ -1898,7 +1940,7 @@ app.get("/me/notifications", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/me/notifications/unread-count", requireAuth, async (req, res) => {
+app.get("/me/notifications/unread-count", requireAnyAuth, async (req, res) => {
   try {
     const { count, error } = await supabaseAdmin
       .from("notifications")
@@ -1916,7 +1958,7 @@ app.get("/me/notifications/unread-count", requireAuth, async (req, res) => {
   }
 });
 
-app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
+app.post("/me/notifications/read-all", requireAnyAuth, async (req, res) => {
   try {
     await supabaseAdmin
       .from("notifications")
@@ -1929,7 +1971,7 @@ app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/me/notifications/:id/read", requireAuth, async (req, res) => {
+app.patch("/me/notifications/:id/read", requireAnyAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "id required" });
@@ -1941,19 +1983,6 @@ app.patch("/me/notifications/:id/read", requireAuth, async (req, res) => {
       .eq("user_id", req.authUser.id);
 
     if (error) return res.status(400).json({ error: error.message });
-    return res.json({ ok: true });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
-  try {
-    await supabaseAdmin
-      .from("notifications")
-      .update({ read_at: new Date() })
-      .eq("user_id", req.authUser.id)
-      .is("read_at", null);
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -2903,7 +2932,7 @@ async function processJobAlerts(job) {
 
 // --- SUPPORT SYSTEM ---
 
-app.post("/support", requireAuth, async (req, res) => {
+app.post("/support", requireAnyAuth, async (req, res) => {
   try {
     const { subject, message, category } = req.body || {};
     if (!message) return res.status(400).json({ error: "Mesaj yazılmayıb" });
@@ -2940,7 +2969,7 @@ app.post("/support", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/support", requireAuth, async (req, res) => {
+app.get("/support", requireAnyAuth, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from("support_tickets")
@@ -2955,7 +2984,7 @@ app.get("/support", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/support/stats", requireAuth, async (req, res) => {
+app.get("/support/stats", requireAnyAuth, async (req, res) => {
   try {
     const { count, error } = await supabaseAdmin
       .from("support_tickets")
@@ -2970,7 +2999,7 @@ app.get("/support/stats", requireAuth, async (req, res) => {
   }
 });
 
-app.post("/support/:id/reply", requireAuth, async (req, res) => {
+app.post("/support/:id/reply", requireAnyAuth, async (req, res) => {
   try {
     const { message } = req.body || {};
     const { id } = req.params;
@@ -3000,7 +3029,7 @@ app.post("/support/:id/reply", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/support/:id/read", requireAuth, async (req, res) => {
+app.patch("/support/:id/read", requireAnyAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { error } = await supabaseAdmin
@@ -3016,7 +3045,7 @@ app.patch("/support/:id/read", requireAuth, async (req, res) => {
   }
 });
 
-app.delete("/support/:id", requireAuth, async (req, res) => {
+app.delete("/support/:id", requireAnyAuth, async (req, res) => {
   try {
     const { id } = req.params;
     // Verify ownership
