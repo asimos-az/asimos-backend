@@ -339,6 +339,54 @@ async function insertNotifications(rows) {
   }
 }
 
+async function notifyAdmins(title, body, dataPayload = {}) {
+  try {
+    const { data: admins, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, expo_push_token, notif_sound_enabled, notif_sound_name")
+      .eq("role", "admin");
+
+    if (error || !admins || admins.length === 0) return { ok: true, matched: 0 };
+
+    const pushMessages = [];
+    const historyRows = [];
+
+    for (const adm of admins) {
+      const userToken = adm.expo_push_token;
+      const sound = (adm.notif_sound_enabled ?? true) ? (adm.notif_sound_name || "default") : null;
+
+      if (userToken && String(userToken).startsWith("ExponentPushToken")) {
+        pushMessages.push({
+          to: userToken,
+          title,
+          body,
+          data: { ...dataPayload, isAdmin: true },
+          sound,
+          priority: "high"
+        });
+      }
+      historyRows.push({
+        user_id: adm.id,
+        title,
+        body,
+        data: { ...dataPayload, isAdmin: true }
+      });
+    }
+
+    if (pushMessages.length > 0) {
+      sendExpoPush(pushMessages).catch(console.error);
+    }
+    if (historyRows.length > 0) {
+      await insertNotifications(historyRows);
+    }
+
+    return { ok: true, matched: admins.length };
+  } catch (e) {
+    console.warn("notifyAdmins error", e);
+    return { ok: false };
+  }
+}
+
 
 
 
@@ -763,7 +811,7 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
 
     let query = supabaseAdmin
       .from("jobs")
-      .select("*")
+      .select("*, ratings!job_id(count)")
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
@@ -1714,6 +1762,14 @@ app.post("/ratings", requireAuth, async (req, res) => {
         .eq("id", target_id);
 
       await logEvent("user_rated", req.authUser.id, { target_id, score: numScore, new_avg: avg });
+
+      // Notify Admins about the rating/report
+      const targetName = (await supabaseAdmin.from("profiles").select("full_name").eq("id", target_id).single())?.data?.full_name || "İstifadəçi";
+      notifyAdmins(
+        "Yeni Rəy/Şikayət",
+        `${req.authUser.fullName || "Bir istifadəçi"} -> ${targetName}: "${comment || (numScore + ' ulduz')}"`,
+        { type: "rating", job_id, target_id, score: numScore }
+      ).catch(console.error);
     }
 
     return res.json({ ok: true });
@@ -1855,6 +1911,19 @@ app.get("/me/notifications/unread-count", requireAuth, async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     return res.json({ unread: count || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/me/notifications/read-all", requireAuth, async (req, res) => {
+  try {
+    await supabaseAdmin
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("user_id", req.authUser.id)
+      .is("read_at", null);
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -2029,12 +2098,16 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     await cleanupExpiredJobs();
 
+    const page = toNum(req.query.page) || 1;
+    const limit = toNum(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
     let query = supabaseAdmin
       .from("jobs")
       .select("*")
       .order("boosted_until", { ascending: false, nullsFirst: false }) // Boosted first
       .order("created_at", { ascending: false })
-      .limit(200);
+      .range(offset, offset + limit - 1);
 
     if (createdBy) {
       if (!req.authUser) return res.status(401).json({ error: "Unauthorized" });
@@ -2437,6 +2510,14 @@ app.post("/jobs", requireAuth, async (req, res) => {
       whatsapp: job.whatsapp,
       link: job.link
     });
+
+    if (job.status === "pending" || job.status === "open") {
+       notifyAdmins(
+         "Yeni Elan (Təsdiq gözləyir)",
+         `${req.authUser.fullName || "İşəgötürən"} yeni elan yerləşdirdi: "${job.title}"`,
+         { type: "new_job", id: job.id }
+       ).catch(console.error);
+    }
 
     processJobAlerts(job).catch(console.error);
     notifyNearbySeekers(job).catch(console.error);
@@ -2961,14 +3042,14 @@ app.get("/admin/support", requireAdmin, async (req, res) => {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
 
-    const { data, error } = await supabaseAdmin
+    const { data, error, count } = await supabaseAdmin
       .from("support_tickets")
-      .select("*, profiles(full_name, phone)")
+      .select("*, profiles(full_name, phone)", { count: 'exact' })
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (error) return res.status(400).json({ error: error.message });
-    return res.json({ items: data, limit, offset });
+    return res.json({ items: data, total: count });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
