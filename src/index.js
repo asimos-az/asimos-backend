@@ -1920,6 +1920,7 @@ app.get("/me/notifications", requireAnyAuth, async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
+    if (req.authUser.id === "admin") return res.json({ items: [], limit, offset });
 
     const { data, error } = await supabaseAdmin
       .from("notifications")
@@ -1942,6 +1943,7 @@ app.get("/me/notifications", requireAnyAuth, async (req, res) => {
 
 app.get("/me/notifications/unread-count", requireAnyAuth, async (req, res) => {
   try {
+    if (req.authUser.id === "admin") return res.json({ unread: 0 });
     const { count, error } = await supabaseAdmin
       .from("notifications")
       .select("id", { count: "exact", head: true })
@@ -1960,6 +1962,7 @@ app.get("/me/notifications/unread-count", requireAnyAuth, async (req, res) => {
 
 app.post("/me/notifications/read-all", requireAnyAuth, async (req, res) => {
   try {
+    if (req.authUser.id === "admin") return res.json({ ok: true });
     await supabaseAdmin
       .from("notifications")
       .update({ read_at: new Date().toISOString() })
@@ -1973,6 +1976,7 @@ app.post("/me/notifications/read-all", requireAnyAuth, async (req, res) => {
 
 app.patch("/me/notifications/:id/read", requireAnyAuth, async (req, res) => {
   try {
+    if (req.authUser.id === "admin") return res.json({ ok: true });
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "id required" });
 
