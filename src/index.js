@@ -535,15 +535,21 @@ async function cleanupExpiredJobs() {
 
 async function activateScheduledJobs() {
   try {
-    const nowIso = new Date().toISOString();
-    // Find all scheduled jobs whose published_at has arrived
-    const { data: due, error } = await supabaseAdmin
+    const nowMs = Date.now();
+    // Fetch scheduled jobs and compare in JS to avoid timezone/parser edge cases in DB filters.
+    const { data: scheduledJobs, error } = await supabaseAdmin
       .from("jobs")
       .select("id, title, created_by, published_at")
-      .eq("status", "scheduled")
-      .lte("published_at", nowIso);
+      .eq("status", "scheduled");
 
-    if (error || !due || due.length === 0) return;
+    if (error || !scheduledJobs || scheduledJobs.length === 0) return;
+
+    const due = scheduledJobs.filter((job) => {
+      const publishMs = Date.parse(job?.published_at || "");
+      return Number.isFinite(publishMs) && publishMs <= nowMs;
+    });
+
+    if (due.length === 0) return;
 
     for (const job of due) {
       // Activate the job
