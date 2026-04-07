@@ -2280,7 +2280,13 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     if (q) {
       const safe = q.replaceAll(",", " ").trim();
-      query = query.or(`title.ilike.%${safe}%,category.ilike.%${safe}%`);
+      const tokens = safe.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+      if (tokens.length > 0) {
+        const expr = tokens
+          .map((t) => `title.ilike.%${t}%,category.ilike.%${t}%,description.ilike.%${t}%`)
+          .join(",");
+        query = query.or(expr);
+      }
     }
 
     if (baseLat !== null && baseLng !== null && radiusM !== null) {
@@ -2350,6 +2356,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         phone: req.authUser ? (r.contact_phone ?? null) : null,
         link: req.authUser ? (r.contact_link ?? null) : null,
         voen: (r.voen ?? null),
+        company_name: (r.company_name ?? null),
+        companyName: (r.company_name ?? null),
         isDaily: r.is_daily,
         jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
         durationDays: (r.duration_days ?? null),
@@ -2465,6 +2473,8 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       phone: req.authUser ? (data.contact_phone ?? null) : null,
       link: req.authUser ? (data.contact_link ?? null) : null,
       voen: (data.voen ?? null),
+      company_name: (data.company_name ?? null),
+      companyName: (data.company_name ?? null),
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
       durationDays: (data.duration_days ?? null),
@@ -2698,6 +2708,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       phone: data.contact_phone ?? null,
       link: data.contact_link ?? null,
       voen: data.voen ?? null,
+      company_name: (data.company_name ?? null),
+      companyName: (data.company_name ?? null),
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
       durationDays: (data.duration_days ?? null),
@@ -2831,6 +2843,8 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       phone: updated.contact_phone ?? null,
       link: updated.contact_link ?? null,
       voen: updated.voen ?? null,
+      company_name: (updated.company_name ?? null),
+      companyName: (updated.company_name ?? null),
       isDaily: updated.is_daily,
       jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
       durationDays: (updated.duration_days ?? null),
