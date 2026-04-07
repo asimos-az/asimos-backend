@@ -524,12 +524,50 @@ async function cleanupExpiredJobs() {
   try {
     const nowIso = new Date().toISOString();
     // Only delete open/pending jobs that expired. Keep closed/rejected/etc.
-    await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso).in("status", ["open", "pending"]);
+    await supabaseAdmin.from("jobs").delete().lte("expires_at", nowIso).in("status", ["open", "pending", "scheduled"]);
 
     const cutoffIso = new Date(Date.now() - 28 * MS_DAY).toISOString();
     await supabaseAdmin.from("jobs").delete().is("expires_at", null).eq("is_daily", false).lte("created_at", cutoffIso);
     await supabaseAdmin.from("jobs").delete().is("expires_at", null).is("is_daily", null).lte("created_at", cutoffIso);
   } catch {
+  }
+}
+
+async function activateScheduledJobs() {
+  try {
+    const nowIso = new Date().toISOString();
+    // Find all scheduled jobs whose published_at has arrived
+    const { data: due, error } = await supabaseAdmin
+      .from("jobs")
+      .select("id, title, created_by, published_at")
+      .eq("status", "scheduled")
+      .lte("published_at", nowIso);
+
+    if (error || !due || due.length === 0) return;
+
+    for (const job of due) {
+      // Activate the job
+      await supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", job.id);
+
+      // Notify the employer
+      try {
+        const title = "Elanınız yayımlandı";
+        const body = `"${job.title}" adlı elanınız planlaşdırılmış vaxtda aktivləşdi və yayımlandı.`;
+        const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", job.created_by);
+        const pushMsgs = [];
+        if (userTokens) {
+          for (const t of userTokens) {
+            if (t.expo_push_token) {
+              pushMsgs.push({ to: t.expo_push_token, title, body, data: { type: "job_status", jobId: job.id, status: "open" }, sound: "default" });
+            }
+          }
+        }
+        if (pushMsgs.length) await sendExpoPush(pushMsgs).catch(() => {});
+        await insertNotifications([{ user_id: job.created_by, title, body, data: { type: "job_status", jobId: job.id, status: "open" } }]).catch(() => {});
+      } catch {}
+    }
+  } catch (e) {
+    console.error("[activateScheduledJobs] Error:", e);
   }
 }
 
@@ -908,6 +946,8 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     }
 
 
+    const publishedAtRaw = body.published_at ?? body.publishedAt ?? body.publish_at ?? body.publishAt;
+
     const insertRow = {
       created_by,
       title,
@@ -929,8 +969,12 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
       working_hours: body.working_hours ? String(body.working_hours).trim() : null,
       company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
-      published_at: body.published_at ? new Date(body.published_at).toISOString() : null,
+      published_at: publishedAtRaw ? new Date(publishedAtRaw).toISOString() : null,
     };
+
+    if (insertRow.status === "open" && insertRow.published_at && new Date(insertRow.published_at) > new Date()) {
+      insertRow.status = "scheduled";
+    }
 
     if (emp.average_rating && emp.average_rating >= 4.8) {
       const boostDate = new Date();
@@ -971,6 +1015,8 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
     const id = req.params.id;
     const patch = req.body || {};
 
+    const patchPublishedAt = patch.published_at ?? patch.publishedAt ?? patch.publish_at ?? patch.publishAt;
+
     const allowed = {
       title: patch.title,
       category: patch.category,
@@ -985,30 +1031,52 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       location_lat: patch.location_lat,
       location_lng: patch.location_lng,
       location_address: patch.location_address,
-      status: patch.status,
       rejection_reason: patch.rejection_reason,
       company_name: (patch.company_name || patch.companyName) ? String(patch.company_name || patch.companyName).trim() : undefined,
       duration_days: patch.duration_days !== undefined ? (patch.duration_days ? Number(patch.duration_days) : null) : undefined,
       starts_at: patch.starts_at !== undefined ? (patch.starts_at ? new Date(patch.starts_at).toISOString() : null) : undefined,
       working_hours: patch.working_hours !== undefined ? (patch.working_hours ? String(patch.working_hours).trim() : null) : undefined,
-      published_at: patch.published_at !== undefined ? (patch.published_at ? new Date(patch.published_at).toISOString() : null) : undefined,
+      published_at: patchPublishedAt !== undefined ? (patchPublishedAt ? new Date(patchPublishedAt).toISOString() : null) : undefined,
     };
+
+    // Scheduled publish logic: if admin sets status=open but published_at is in the future, set status=scheduled instead
+    if (patch.status === "open") {
+      const { data: currentJob } = await supabaseAdmin.from("jobs").select("published_at").eq("id", id).single();
+      const publishAt = patchPublishedAt ? new Date(patchPublishedAt) : (currentJob?.published_at ? new Date(currentJob.published_at) : null);
+      if (publishAt && publishAt > new Date()) {
+        allowed.status = "scheduled";
+      } else {
+        allowed.status = "open";
+      }
+    } else if (patch.status !== undefined) {
+      allowed.status = patch.status;
+    }
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
 
     const { data: updatedJob, error } = await supabaseAdmin.from("jobs").update(allowed).eq("id", id).select("*").single();
     if (error) return res.status(400).json({ error: error.message });
 
-    // Handle Notifications for Status Changes (Pending -> Open / Pending -> Rejected)
-    if (patch.status === "rejected" || patch.status === "open") {
+    // Handle Notifications for Status Changes
+    const effectiveStatus = allowed.status;
+    if (effectiveStatus === "rejected" || effectiveStatus === "open" || effectiveStatus === "scheduled") {
       try {
         const creatorId = updatedJob.created_by;
         if (creatorId) {
-          const isRejected = patch.status === "rejected";
-          const title = isRejected ? "Elanınız rədd edildi" : "Elanınız təsdiqləndi";
-          const reasonHtml = patch.rejection_reason ? `\nSəbəb: ${patch.rejection_reason}` : "";
-          const body = isRejected 
-            ? `"${updatedJob.title}" adlı elanınız təəssüf ki, təsdiqlənmədi.${reasonHtml}`
-            : `Təbriklər! "${updatedJob.title}" adlı elanınız artıq aktivdir.`;
+          let title, body;
+          if (effectiveStatus === "rejected") {
+            title = "Elanınız rədd edildi";
+            const reasonHtml = patch.rejection_reason ? `\nSəbəb: ${patch.rejection_reason}` : "";
+            body = `"${updatedJob.title}" adlı elanınız təəssüf ki, təsdiqlənmədi.${reasonHtml}`;
+          } else if (effectiveStatus === "scheduled") {
+            const publishAt = updatedJob.published_at
+              ? new Date(updatedJob.published_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
+              : "";
+            title = "Elanınız təsdiqləndi — Planlı";
+            body = `"${updatedJob.title}" adlı elanınız təsdiqləndi və ${publishAt} tarixində avtomatik yayımlanacaq.`;
+          } else {
+            title = "Elanınız təsdiqləndi";
+            body = `Təbriklər! "${updatedJob.title}" adlı elanınız artıq aktivdir.`;
+          }
 
           const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", creatorId);
           
@@ -1020,7 +1088,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
                   to: t.expo_push_token,
                   title,
                   body,
-                  data: { type: "job_status", jobId: id, status: patch.status },
+                  data: { type: "job_status", jobId: id, status: effectiveStatus },
                   sound: "default"
                 });
               }
@@ -1035,13 +1103,14 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
             user_id: creatorId,
             title,
             body,
-            data: { type: "job_status", jobId: id, status: patch.status }
+            data: { type: "job_status", jobId: id, status: effectiveStatus }
           }]).catch(e => console.error("[Job Notify] DB Error:", e));
         }
       } catch (e) {
         console.error("[Job Notify] Error:", e);
       }
     }
+
 
     await logEvent("admin_job_updated", null, { job_id: id, patch: allowed });
     return res.json({ ok: true, job: updatedJob });
@@ -2143,6 +2212,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     const jobTypeFilter = req.query.jobType ? String(req.query.jobType).trim() : null;
 
     await cleanupExpiredJobs();
+    await activateScheduledJobs();
 
     const page = toNum(req.query.page) || 1;
     const limit = toNum(req.query.limit) || 20;
@@ -2312,6 +2382,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
     if (!id) return res.status(400).json({ error: "id required" });
 
     await cleanupExpiredJobs();
+    await activateScheduledJobs();
 
     const { data, error } = await supabaseAdmin
       .from("jobs")
@@ -2414,6 +2485,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       companyName,
       published_at,
       publishedAt,
+      publish_at,
+      publishAt,
     } = req.body || {};
 
     if (!title) return res.status(400).json({ error: "Title required" });
@@ -2463,6 +2536,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       initialStatus = "open";
     }
 
+    const selectedPublishAt = published_at || publishedAt || publish_at || publishAt;
+
     const payload = {
       created_by: req.authUser.id,
       status: initialStatus,
@@ -2483,7 +2558,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location_lng: locLng,
       location_address: locAddr,
       company_name: (company_name || companyName) ? String(company_name || companyName).trim() : null,
-      published_at: (published_at || publishedAt) ? new Date(published_at || publishedAt).toISOString() : null,
+      published_at: selectedPublishAt ? new Date(selectedPublishAt).toISOString() : null,
     };
 
     let data = null;
@@ -2497,13 +2572,13 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     if (error) {
       const msg = String(error.message || "");
-      if (/column .*\b(job_type|duration_days|expires_at|status)\b/i.test(msg)) {
+      if (/column .*\b(job_type|duration_days|expires_at|status|published_at)\b/i.test(msg)) {
         const fallback = { ...payload };
         fallback.job_type = undefined;
         fallback.duration_days = undefined;
         fallback.expires_at = undefined;
         fallback.status = undefined;
-        fallback.status = undefined;
+        fallback.published_at = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
