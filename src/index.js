@@ -2313,7 +2313,20 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     let items = (data || []).map((r) => {
       const expiresMs = r.expires_at ? new Date(r.expires_at).getTime() : null;
       const createdMs = r.created_at ? new Date(r.created_at).getTime() : null;
-      const status = (r.status || "open");
+      let status = (r.status || "open");
+
+      // Inline scheduled→open: if published_at has passed, treat as open immediately
+      // and fire a background DB update (guaranteed even if cron missed it).
+      if (status === "scheduled") {
+        const pubMs = r.published_at ? Date.parse(r.published_at) : NaN;
+        if (!isNaN(pubMs) && pubMs <= nowMs) {
+          status = "open";
+          supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", r.id).eq("status", "scheduled").then(() => {
+            console.log(`[inline-activate] Job ${r.id} set to open (was scheduled, published_at=${r.published_at})`);
+          }).catch((e) => console.error("[inline-activate] Error:", e?.message));
+        }
+      }
+
       if (status !== 'closed' && expiresMs !== null && expiresMs <= nowMs) return null;
       if (status !== 'closed' && expiresMs === null && (r.is_daily === false || r.is_daily === null) && createdMs !== null && createdMs <= (nowMs - 28 * MS_DAY)) return null;
 
@@ -2346,9 +2359,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         notifyRadiusM: r.notify_radius_m,
         createdAt: r.created_at,
         createdBy: r.created_by,
-        status: (r.status || "open"),
-        closedAt: (r.closed_at ?? null),
-        closedReason: (r.closed_reason ?? null),
+        status: status,
         closedAt: (r.closed_at ?? null),
         closedReason: (r.closed_reason ?? null),
         boostedUntil: (r.boosted_until ?? null),
@@ -2432,14 +2443,24 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
     const baseLat = toNum(profile?.location?.lat);
     const baseLng = toNum(profile?.location?.lng);
 
+    // Inline scheduled→open for single job fetch
+    let singleStatus = data.status || "open";
+    if (singleStatus === "scheduled") {
+      const pubMs = data.published_at ? Date.parse(data.published_at) : NaN;
+      if (!isNaN(pubMs) && pubMs <= Date.now()) {
+        singleStatus = "open";
+        supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", data.id).eq("status", "scheduled").then(() => {
+          console.log(`[inline-activate-single] Job ${data.id} set to open`);
+        }).catch((e) => console.error("[inline-activate-single] Error:", e?.message));
+      }
+    }
+
     const job = {
       id: data.id,
       title: data.title,
       category: data.category,
       description: data.description,
       wage: data.wage,
-      whatsapp: (req.authUser || data.whatsapp) ? (data.whatsapp ?? null) : null, // Show if auth OR if field exists (logic tweak) - actually keeping original logic but ensuring admin gets it. 
-      // Better:
       whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
       phone: req.authUser ? (data.contact_phone ?? null) : null,
       link: req.authUser ? (data.contact_link ?? null) : null,
@@ -2453,7 +2474,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       notifyRadiusM: data.notify_radius_m,
       createdAt: data.created_at,
       createdBy: data.created_by,
-      status: (data.status || "open"),
+      status: singleStatus,
       rejectionReason: data.rejection_reason || null,
       closedAt: (data.closed_at ?? null),
       closedReason: (data.closed_reason ?? null),
