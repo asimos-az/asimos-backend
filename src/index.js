@@ -2750,6 +2750,110 @@ app.post("/jobs", requireAuth, async (req, res) => {
   }
 });
 
+app.patch("/jobs/:id", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const profile = await getProfile(req.authUser.id);
+    if (!profile || !["employer", "seeker"].includes(profile.role)) {
+      return res.status(403).json({ error: "Invalid role" });
+    }
+
+    const { data: existing, error: gErr } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (gErr) return res.status(400).json({ error: gErr.message });
+    if (!existing) return res.status(404).json({ error: "Not found" });
+    if (existing.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+
+    const body = req.body || {};
+
+    const nextTitle = body.title !== undefined ? String(body.title || "").trim() : undefined;
+    if (nextTitle !== undefined && !nextTitle) return res.status(400).json({ error: "Title required" });
+
+    let locLat = body.location?.lat !== undefined ? toNum(body.location?.lat) : toNum(existing.location_lat);
+    let locLng = body.location?.lng !== undefined ? toNum(body.location?.lng) : toNum(existing.location_lng);
+    let locAddr = body.location?.address !== undefined
+      ? (body.location?.address ? String(body.location.address) : null)
+      : (existing.location_address ?? null);
+
+    if (locLat === null || locLng === null) {
+      return res.status(400).json({ error: "Lokasiya seçilməlidir" });
+    }
+    if (!isValidLatLng(locLat, locLng)) {
+      return res.status(400).json({ error: "Lokasiya koordinatları düzgün deyil" });
+    }
+
+    const allowed = {
+      title: nextTitle,
+      category: body.category !== undefined ? (body.category || null) : undefined,
+      description: body.description !== undefined ? String(body.description || "") : undefined,
+      wage: body.wage !== undefined ? (body.wage || null) : undefined,
+      whatsapp: body.whatsapp !== undefined ? (body.whatsapp || null) : undefined,
+      contact_phone: (body.contactPhone !== undefined || body.phone !== undefined)
+        ? (body.contactPhone || body.phone ? String(body.contactPhone || body.phone).trim() : null)
+        : undefined,
+      contact_link: (body.contactLink !== undefined || body.link !== undefined)
+        ? (body.contactLink || body.link ? String(body.contactLink || body.link).trim() : null)
+        : undefined,
+      voen: body.voen !== undefined ? (body.voen ? String(body.voen).trim() : null) : undefined,
+      notify_radius_m: body.notifyRadiusM !== undefined ? toNum(body.notifyRadiusM) : undefined,
+      location_lat: locLat,
+      location_lng: locLng,
+      location_address: locAddr,
+    };
+
+    if (existing.status === "rejected") {
+      allowed.status = "pending";
+      allowed.rejection_reason = null;
+    }
+
+    Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
+
+    const { data: updated, error: upErr } = await supabaseAdmin
+      .from("jobs")
+      .update(allowed)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (upErr) return res.status(400).json({ error: upErr.message });
+
+    const job = {
+      id: updated.id,
+      title: updated.title,
+      category: updated.category,
+      description: updated.description,
+      wage: updated.wage,
+      whatsapp: updated.whatsapp,
+      phone: updated.contact_phone ?? null,
+      link: updated.contact_link ?? null,
+      voen: updated.voen ?? null,
+      isDaily: updated.is_daily,
+      jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      durationDays: (updated.duration_days ?? null),
+      expiresAt: (updated.expires_at ?? null),
+      publishedAt: (updated.published_at ?? null),
+      published_at: (updated.published_at ?? null),
+      notifyRadiusM: updated.notify_radius_m,
+      createdAt: updated.created_at,
+      createdBy: updated.created_by,
+      status: (updated.status || "open"),
+      rejectionReason: updated.rejection_reason || null,
+      closedAt: (updated.closed_at ?? null),
+      closedReason: (updated.closed_reason ?? null),
+      location: { lat: updated.location_lat, lng: updated.location_lng, address: updated.location_address },
+    };
+
+    await logEvent("job_update_self", req.authUser.id, { job_id: id, role: profile.role });
+    return res.json(job);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || "");
