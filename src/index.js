@@ -533,29 +533,45 @@ async function cleanupExpiredJobs() {
   }
 }
 
+// Returns a Set of job IDs that were activated in this call.
 async function activateScheduledJobs() {
+  const activatedIds = new Set();
   try {
     const nowMs = Date.now();
-    // Fetch scheduled jobs and compare in JS to avoid timezone/parser edge cases in DB filters.
     const { data: scheduledJobs, error } = await supabaseAdmin
       .from("jobs")
       .select("id, title, created_by, published_at")
       .eq("status", "scheduled");
 
-    if (error || !scheduledJobs || scheduledJobs.length === 0) return;
+    if (error) {
+      console.error("[activateScheduledJobs] Fetch error:", error.message);
+      return activatedIds;
+    }
+    if (!scheduledJobs || scheduledJobs.length === 0) return activatedIds;
 
     const due = scheduledJobs.filter((job) => {
       const publishMs = Date.parse(job?.published_at || "");
       return Number.isFinite(publishMs) && publishMs <= nowMs;
     });
 
-    if (due.length === 0) return;
+    if (due.length === 0) return activatedIds;
+
+    console.log(`[activateScheduledJobs] Activating ${due.length} job(s), serverNow=${new Date(nowMs).toISOString()}`);
 
     for (const job of due) {
-      // Activate the job
-      await supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", job.id);
+      const { error: upErr } = await supabaseAdmin
+        .from("jobs")
+        .update({ status: "open" })
+        .eq("id", job.id)
+        .eq("status", "scheduled"); // guard: only update if still scheduled
+      if (upErr) {
+        console.error(`[activateScheduledJobs] Update failed for job ${job.id}:`, upErr.message);
+        continue;
+      }
+      activatedIds.add(job.id);
+      console.log(`[activateScheduledJobs] Activated job ${job.id} (published_at=${job.published_at})`);
 
-      // Notify the employer
+      // Notify the employer (non-blocking)
       try {
         const title = "Elanınız yayımlandı";
         const body = `"${job.title}" adlı elanınız planlaşdırılmış vaxtda aktivləşdi və yayımlandı.`;
@@ -568,13 +584,14 @@ async function activateScheduledJobs() {
             }
           }
         }
-        if (pushMsgs.length) await sendExpoPush(pushMsgs).catch(() => {});
-        await insertNotifications([{ user_id: job.created_by, title, body, data: { type: "job_status", jobId: job.id, status: "open" } }]).catch(() => {});
+        if (pushMsgs.length) sendExpoPush(pushMsgs).catch(() => {});
+        insertNotifications([{ user_id: job.created_by, title, body, data: { type: "job_status", jobId: job.id, status: "open" } }]).catch(() => {});
       } catch {}
     }
   } catch (e) {
     console.error("[activateScheduledJobs] Error:", e);
   }
+  return activatedIds;
 }
 
 
@@ -2218,7 +2235,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     const jobTypeFilter = req.query.jobType ? String(req.query.jobType).trim() : null;
 
     await cleanupExpiredJobs();
-    await activateScheduledJobs();
+    const activatedIds = await activateScheduledJobs();
 
     const page = toNum(req.query.page) || 1;
     const limit = toNum(req.query.limit) || 20;
@@ -2369,6 +2386,16 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
     }
 
+    // Patch status for jobs activated just now (guard against read-after-write lag)
+    if (activatedIds.size > 0) {
+      items = items.map((j) => {
+        if (activatedIds.has(j.id) && j.status === "scheduled") {
+          return { ...j, status: "open" };
+        }
+        return j;
+      });
+    }
+
     if (!req.authUser) {
       items = items.map((j) => ({
         ...j,
@@ -2390,7 +2417,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
     if (!id) return res.status(400).json({ error: "id required" });
 
     await cleanupExpiredJobs();
-    await activateScheduledJobs();
+    const activatedIdsForSingle = await activateScheduledJobs();
 
     const { data, error } = await supabaseAdmin
       .from("jobs")
@@ -2463,9 +2490,47 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       job.distanceM = Math.round(haversineDistanceM(baseLat, baseLng, job.location.lat, job.location.lng));
     }
 
+    // Patch status if just activated in this same request
+    if (activatedIdsForSingle.has(job.id) && job.status === "scheduled") {
+      job.status = "open";
+    }
+
     return res.json(job);
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+// Public activation trigger – mobile calls this on job screen load
+app.post("/jobs/activate-due", async (req, res) => {
+  try {
+    const ids = await activateScheduledJobs();
+    return res.json({ ok: true, activated: ids.size, ids: [...ids] });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Admin debug: see scheduled jobs vs server time
+app.get("/admin/debug-scheduled", requireAdmin, async (req, res) => {
+  try {
+    const nowMs = Date.now();
+    const { data: jobs } = await supabaseAdmin
+      .from("jobs")
+      .select("id, title, status, published_at")
+      .in("status", ["scheduled", "pending"]);
+    return res.json({
+      serverNow: new Date(nowMs).toISOString(),
+      serverNowMs: nowMs,
+      jobs: (jobs || []).map((j) => ({
+        id: j.id, title: j.title, status: j.status,
+        published_at: j.published_at,
+        published_at_ms: j.published_at ? Date.parse(j.published_at) : null,
+        is_due: j.published_at ? Date.parse(j.published_at) <= nowMs : false,
+      })),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
 });
 
