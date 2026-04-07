@@ -1062,6 +1062,19 @@ app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
   }
 });
 
+app.get("/admin/jobs/:id/ratings", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("ratings")
+      .select("*, reviewer:profiles!reviewer_id(id, full_name, email, phone)")
+      .eq("job_id", req.params.id)
+      .order("created_at", { ascending: false });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
 
 app.get("/admin/categories", requireAdmin, async (req, res) => {
   try {
