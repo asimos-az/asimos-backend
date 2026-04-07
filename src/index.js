@@ -1069,7 +1069,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
             body = `"${updatedJob.title}" adlı elanınız təəssüf ki, təsdiqlənmədi.${reasonHtml}`;
           } else if (effectiveStatus === "scheduled") {
             const publishAt = updatedJob.published_at
-              ? new Date(updatedJob.published_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
+              ? new Date(updatedJob.published_at).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Baku" })
               : "";
             title = "Elanınız təsdiqləndi — Planlı";
             body = `"${updatedJob.title}" adlı elanınız təsdiqləndi və ${publishAt} tarixində avtomatik yayımlanacaq.`;
@@ -3293,6 +3293,15 @@ app.listen(PORT, () => {
 
 
 cron.schedule("0 8,19 * * *", () => {
+});
+
+// Run every minute so scheduled ads become active exactly at selected time.
+cron.schedule("* * * * *", async () => {
+  try {
+    await activateScheduledJobs();
+  } catch (e) {
+    console.error("[scheduled-jobs-cron] Error:", e?.message || e);
+  }
 });
 
 app.post("/admin/trigger-notifications", async (req, res) => {
