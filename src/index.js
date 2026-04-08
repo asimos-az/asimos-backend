@@ -2218,11 +2218,29 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
 
     // ── employer → seeker (immediate, no admin approval) ──────────────────────
     if (toRole === "seeker") {
-      // Delete all employer's jobs (cascade handles applications, job notifications)
-      await supabaseAdmin.from("jobs").delete().eq("created_by", userId);
-      // Delete user's notifications
+      // 1. Get all job IDs for this employer
+      const { data: employerJobs } = await supabaseAdmin
+        .from("jobs")
+        .select("id")
+        .eq("created_by", userId);
+
+      const jobIds = (employerJobs || []).map((j) => j.id);
+
+      // 2. Delete ratings that reference these jobs (FK constraint: ratings.job_id → jobs.id no cascade)
+      if (jobIds.length > 0) {
+        await supabaseAdmin.from("ratings").delete().in("job_id", jobIds);
+      }
+
+      // 3. Delete jobs
+      if (jobIds.length > 0) {
+        const { error: jobsErr } = await supabaseAdmin.from("jobs").delete().eq("created_by", userId);
+        if (jobsErr) console.error("[RoleSwitch] jobs delete error:", jobsErr.message);
+      }
+
+      // 4. Delete user's notifications
       await supabaseAdmin.from("notifications").delete().eq("user_id", userId);
-      // Clear any pending role switch requests
+
+      // 5. Clear any pending role switch requests
       try {
         await supabaseAdmin.from("role_switch_requests").delete().eq("user_id", userId);
       } catch { }
