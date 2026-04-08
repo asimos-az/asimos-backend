@@ -2346,10 +2346,11 @@ app.get("/admin/role-switch-requests", requireAdmin, async (req, res) => {
     const userIds = [...new Set((requests || []).map((r) => r.user_id))];
     let profileMap = {};
     if (userIds.length > 0) {
-      const { data: profiles } = await supabaseAdmin
+      const { data: profiles, error: profilesErr } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, phone, email")
+        .select("id, full_name, phone")
         .in("id", userIds);
+      if (profilesErr) return res.status(400).json({ error: profilesErr.message });
       (profiles || []).forEach((p) => { profileMap[p.id] = p; });
     }
 
@@ -2431,7 +2432,8 @@ app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, re
 app.post("/admin/role-switch-requests/:id/reject", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { note } = req.body || {};
+    const note = String(req.body?.note || "").trim();
+    if (!note) return res.status(400).json({ error: "Rədd üçün qeyd yazılmalıdır" });
 
     const { data: switchReq, error: fetchErr } = await supabaseAdmin
       .from("role_switch_requests")
@@ -2444,7 +2446,7 @@ app.post("/admin/role-switch-requests/:id/reject", requireAdmin, async (req, res
 
     await supabaseAdmin
       .from("role_switch_requests")
-      .update({ status: "rejected", reviewer_note: note || null, reviewed_at: new Date().toISOString() })
+      .update({ status: "rejected", reviewer_note: note, reviewed_at: new Date().toISOString() })
       .eq("id", id);
 
     const { data: userProfile } = await supabaseAdmin
@@ -2456,7 +2458,7 @@ app.post("/admin/role-switch-requests/:id/reject", requireAdmin, async (req, res
     const historyRow = {
       user_id: switchReq.user_id,
       title: "Rol dəyişikliyi rədd edildi",
-      body: note ? `Səbəb: ${note}` : "Hesabınızın rol dəyişikliyi sorğusu rədd edildi.",
+      body: `Səbəb: ${note}`,
       data: { type: "role_switch_rejected" },
     };
 
