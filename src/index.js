@@ -2223,7 +2223,9 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
       // Delete user's notifications
       await supabaseAdmin.from("notifications").delete().eq("user_id", userId);
       // Clear any pending role switch requests
-      await supabaseAdmin.from("role_switch_requests").delete().eq("user_id", userId).catch(() => {});
+      try {
+        await supabaseAdmin.from("role_switch_requests").delete().eq("user_id", userId);
+      } catch { }
 
       const { error: updateErr } = await supabaseAdmin
         .from("profiles")
