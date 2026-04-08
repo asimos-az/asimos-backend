@@ -2253,8 +2253,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       .from("jobs")
       .select("*")
       .order("boosted_until", { ascending: false, nullsFirst: false }) // Boosted first
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+      .order("created_at", { ascending: false });
 
     if (createdBy) {
       if (!req.authUser) return res.status(401).json({ error: "Unauthorized" });
@@ -2401,7 +2400,6 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       const needles = qPhrases.map((x) => String(x || "").toLowerCase()).filter(Boolean);
       items = items.filter((j) => {
         const hay = `${j.title || ""} ${j.category || ""} ${j.description || ""}`.toLowerCase();
-        // Match if any phrase tag is present.
         return needles.some((n) => hay.includes(n));
       });
     }
@@ -2409,7 +2407,6 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     if (radiusM !== null) {
       items = items.filter((j) => typeof j.distanceM !== "number" || j.distanceM <= radiusM);
     }
-
 
     if (!profile || profile?.role === "seeker") {
       items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
@@ -2433,6 +2430,18 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         link: null,
       }));
     }
+
+    // Sort by newest first (boosted jobs already at top from DB order, preserve relative order)
+    items.sort((a, b) => {
+      const aB = a.boostedUntil && new Date(a.boostedUntil) > new Date() ? 1 : 0;
+      const bB = b.boostedUntil && new Date(b.boostedUntil) > new Date() ? 1 : 0;
+      if (aB !== bB) return bB - aB;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+
+    // JS-side pagination (applied AFTER all filtering so pages are accurate)
+    const totalFiltered = items.length;
+    items = items.slice(offset, offset + limit);
 
     return res.json(items);
   } catch (e) {
