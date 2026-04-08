@@ -2189,6 +2189,278 @@ app.delete("/me/account", requireAuth, async (req, res) => {
   }
 });
 
+// ── Role Switch ────────────────────────────────────────────────────────────────
+
+app.post("/me/request-role-switch", requireAuth, async (req, res) => {
+  try {
+    const userId = req.authUser.id;
+    const { toRole, companyName, category } = req.body || {};
+
+    if (!["seeker", "employer"].includes(toRole)) {
+      return res.status(400).json({ error: "Yanlış rol" });
+    }
+
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (!profile) return res.status(404).json({ error: "Profil tapılmadı" });
+
+    const fromRole = profile.role;
+    if (fromRole === toRole) {
+      return res.status(400).json({ error: "Artıq bu rolda siniz" });
+    }
+    if (!["seeker", "employer"].includes(fromRole)) {
+      return res.status(400).json({ error: "Bu əməliyyat bu hesab üçün mümkün deyil" });
+    }
+
+    // ── employer → seeker (immediate, no admin approval) ──────────────────────
+    if (toRole === "seeker") {
+      // Delete all employer's jobs (cascade handles applications, job notifications)
+      await supabaseAdmin.from("jobs").delete().eq("created_by", userId);
+      // Delete user's notifications
+      await supabaseAdmin.from("notifications").delete().eq("user_id", userId);
+      // Clear any pending role switch requests
+      await supabaseAdmin.from("role_switch_requests").delete().eq("user_id", userId).catch(() => {});
+
+      const { error: updateErr } = await supabaseAdmin
+        .from("profiles")
+        .update({ role: "seeker", company_name: null, category: null })
+        .eq("id", userId);
+
+      if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+      await logEvent("role_switch_to_seeker", userId, { fromRole: "employer" });
+      return res.json({ ok: true, immediate: true, newRole: "seeker" });
+    }
+
+    // ── seeker → employer (needs admin approval) ──────────────────────────────
+    const cleanCompany = String(companyName || "").trim();
+    if (!cleanCompany) {
+      return res.status(400).json({ error: "Şirkət / müəssisə adı tələb olunur" });
+    }
+
+    // Check for existing pending request
+    const { data: existingReq } = await supabaseAdmin
+      .from("role_switch_requests")
+      .select("id, status")
+      .eq("user_id", userId)
+      .eq("status", "pending")
+      .maybeSingle();
+
+    if (existingReq) {
+      return res.status(409).json({ error: "Artıq aktiv sorğunuz var", status: "pending" });
+    }
+
+    const { data: switchReq, error: insertErr } = await supabaseAdmin
+      .from("role_switch_requests")
+      .insert({
+        user_id: userId,
+        from_role: fromRole,
+        to_role: toRole,
+        status: "pending",
+        company_name: cleanCompany,
+        category: category ? String(category).trim() : null,
+      })
+      .select("id")
+      .single();
+
+    if (insertErr) return res.status(500).json({ error: insertErr.message });
+
+    await notifyAdmins(
+      "Rol dəyişikliyi sorğusu",
+      `${profile.full_name || "İstifadəçi"} iş axtarandan işçi axtarana keçmək istəyir (${cleanCompany})`,
+      { type: "role_switch_request", requestId: switchReq.id, userId }
+    );
+
+    await logEvent("role_switch_request_pending", userId, {
+      fromRole,
+      toRole,
+      requestId: switchReq.id,
+      companyName: cleanCompany,
+    });
+
+    return res.json({
+      ok: true,
+      pending: true,
+      requestId: switchReq.id,
+      message: "Sorğunuz admina göndərildi. Təsdiqləndikdən sonra hesabınız işçi axtarana keçiriləcək.",
+    });
+  } catch (e) {
+    console.error("[RoleSwitch]", e);
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/me/role-switch-status", requireAuth, async (req, res) => {
+  try {
+    const userId = req.authUser.id;
+    const { data } = await supabaseAdmin
+      .from("role_switch_requests")
+      .select("id, from_role, to_role, status, reviewer_note, requested_at, reviewed_at, company_name")
+      .eq("user_id", userId)
+      .order("requested_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    return res.json({ request: data || null });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/role-switch-requests", requireAdmin, async (req, res) => {
+  try {
+    const statusFilter = (req.query.status || "pending").toString().trim();
+
+    const { data: requests, error } = await supabaseAdmin
+      .from("role_switch_requests")
+      .select("*")
+      .eq("status", statusFilter)
+      .order("requested_at", { ascending: false });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const userIds = [...new Set((requests || []).map((r) => r.user_id))];
+    let profileMap = {};
+    if (userIds.length > 0) {
+      const { data: profiles } = await supabaseAdmin
+        .from("profiles")
+        .select("id, full_name, phone, email")
+        .in("id", userIds);
+      (profiles || []).forEach((p) => { profileMap[p.id] = p; });
+    }
+
+    const items = (requests || []).map((r) => ({ ...r, user: profileMap[r.user_id] || null }));
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body || {};
+
+    const { data: switchReq, error: fetchErr } = await supabaseAdmin
+      .from("role_switch_requests")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (fetchErr || !switchReq) return res.status(404).json({ error: "Sorğu tapılmadı" });
+    if (switchReq.status !== "pending") return res.status(400).json({ error: "Sorğu artıq işlənib" });
+
+    await supabaseAdmin
+      .from("profiles")
+      .update({
+        role: switchReq.to_role,
+        company_name: switchReq.company_name || null,
+        category: switchReq.category || null,
+        status: "active",
+      })
+      .eq("id", switchReq.user_id);
+
+    await supabaseAdmin
+      .from("role_switch_requests")
+      .update({ status: "approved", reviewer_note: note || null, reviewed_at: new Date().toISOString() })
+      .eq("id", id);
+
+    const { data: userProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("expo_push_token, notif_sound_enabled, notif_sound_name")
+      .eq("id", switchReq.user_id)
+      .maybeSingle();
+
+    const historyRow = {
+      user_id: switchReq.user_id,
+      title: "Rol dəyişikliyi təsdiqləndi ✓",
+      body: "Hesabınız işçi axtaran kimi aktivləşdirildi. Tətbiqdən çıxıb yenidən daxil olun.",
+      data: { type: "role_switch_approved" },
+    };
+
+    await insertNotifications([historyRow]);
+
+    if (userProfile?.expo_push_token?.startsWith("ExponentPushToken")) {
+      const sound = (userProfile.notif_sound_enabled ?? true) ? (userProfile.notif_sound_name || "default") : null;
+      sendExpoPush([{
+        to: userProfile.expo_push_token,
+        title: historyRow.title,
+        body: historyRow.body,
+        data: historyRow.data,
+        sound,
+        priority: "high",
+      }]).catch(console.error);
+    }
+
+    await logEvent("admin_role_switch_approved", null, {
+      requestId: id,
+      userId: switchReq.user_id,
+      toRole: switchReq.to_role,
+    });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/admin/role-switch-requests/:id/reject", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body || {};
+
+    const { data: switchReq, error: fetchErr } = await supabaseAdmin
+      .from("role_switch_requests")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (fetchErr || !switchReq) return res.status(404).json({ error: "Sorğu tapılmadı" });
+    if (switchReq.status !== "pending") return res.status(400).json({ error: "Sorğu artıq işlənib" });
+
+    await supabaseAdmin
+      .from("role_switch_requests")
+      .update({ status: "rejected", reviewer_note: note || null, reviewed_at: new Date().toISOString() })
+      .eq("id", id);
+
+    const { data: userProfile } = await supabaseAdmin
+      .from("profiles")
+      .select("expo_push_token, notif_sound_enabled, notif_sound_name")
+      .eq("id", switchReq.user_id)
+      .maybeSingle();
+
+    const historyRow = {
+      user_id: switchReq.user_id,
+      title: "Rol dəyişikliyi rədd edildi",
+      body: note ? `Səbəb: ${note}` : "Hesabınızın rol dəyişikliyi sorğusu rədd edildi.",
+      data: { type: "role_switch_rejected" },
+    };
+
+    await insertNotifications([historyRow]);
+
+    if (userProfile?.expo_push_token?.startsWith("ExponentPushToken")) {
+      const sound = (userProfile.notif_sound_enabled ?? true) ? (userProfile.notif_sound_name || "default") : null;
+      sendExpoPush([{
+        to: userProfile.expo_push_token,
+        title: historyRow.title,
+        body: historyRow.body,
+        data: historyRow.data,
+        sound,
+        priority: "high",
+      }]).catch(console.error);
+    }
+
+    await logEvent("admin_role_switch_rejected", null, { requestId: id, userId: switchReq.user_id });
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.get("/me/alerts", requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
