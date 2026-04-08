@@ -1409,6 +1409,19 @@ app.post("/auth/register", async (req, res) => {
 
     const otpUserId = data?.user?.id;
     if (otpUserId) {
+      // Prevent cross-role registration with the same email/account.
+      const { data: existingProfileByUserId } = await supabaseAdmin
+        .from("profiles")
+        .select("id, role")
+        .eq("id", otpUserId)
+        .maybeSingle();
+
+      if (existingProfileByUserId?.role && existingProfileByUserId.role !== role) {
+        return res.status(409).json({
+          error: `Bu email artıq '${existingProfileByUserId.role}' kimi qeydiyyatdan keçib. Eyni email ilə fərqli rol üçün qeydiyyat olmaz.`,
+        });
+      }
+
       try {
         const existing = data.user.user_metadata || {};
         await supabaseAdmin.auth.admin.updateUserById(otpUserId, {
@@ -1425,15 +1438,18 @@ app.post("/auth/register", async (req, res) => {
       } catch { }
 
       try {
-        await supabaseAdmin.from("profiles").upsert({
-          id: otpUserId,
-          role,
-          full_name: fullName,
-          company_name: role === "employer" ? (companyName || null) : null,
-          phone: phone || null,
-          location: location || null,
-          category: role === "employer" ? (category || null) : null,
-        });
+        // Create profile only if missing; never override an existing role at register step.
+        if (!existingProfileByUserId) {
+          await supabaseAdmin.from("profiles").insert({
+            id: otpUserId,
+            role,
+            full_name: fullName,
+            company_name: role === "employer" ? (companyName || null) : null,
+            phone: phone || null,
+            location: location || null,
+            category: role === "employer" ? (category || null) : null,
+          });
+        }
       } catch { }
     }
 
@@ -1574,7 +1590,12 @@ app.post("/auth/verify-otp", async (req, res) => {
     } catch { }
 
     // Check if profile exists (if not, it's a new or resurrected user -> clean up potential orphans)
-    const { data: existingProfile } = await supabaseAdmin.from("profiles").select("id").eq("id", userId).maybeSingle();
+    const { data: existingProfile } = await supabaseAdmin.from("profiles").select("id, role").eq("id", userId).maybeSingle();
+    if (existingProfile?.role && existingProfile.role !== finalRole) {
+      return res.status(409).json({
+        error: `Bu email artıq '${existingProfile.role}' kimi qeydiyyatdan keçib. Eyni email ilə fərqli rol üçün qeydiyyat olmaz.`,
+      });
+    }
     if (!existingProfile) {
       try {
         await supabaseAdmin.from("notifications").delete().eq("user_id", userId);
