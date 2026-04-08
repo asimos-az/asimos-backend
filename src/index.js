@@ -2220,6 +2220,14 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     const createdBy = req.query.createdBy ? String(req.query.createdBy) : null;
 
     const q = req.query.q ? String(req.query.q) : "";
+    const qPhrases = (() => {
+      const raw = String(q || "").trim();
+      if (!raw) return [];
+      // New UI sends tags joined by |||. If missing, treat as one phrase.
+      return raw.includes("|||")
+        ? raw.split("|||").map((x) => x.trim()).filter(Boolean)
+        : [raw];
+    })();
     const dailyRaw = req.query.daily;
     const daily = (dailyRaw === undefined || dailyRaw === null || dailyRaw === "") ? null : (String(dailyRaw) === "true");
 
@@ -2278,16 +2286,9 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
     if (daily !== null) query = query.eq("is_daily", daily);
 
-    if (q) {
-      const safe = q.replaceAll(",", " ").trim();
-      const tokens = safe.split(/\s+/).map((t) => t.trim()).filter(Boolean);
-      if (tokens.length > 0) {
-        const expr = tokens
-          .map((t) => `title.ilike.%${t}%,category.ilike.%${t}%,description.ilike.%${t}%`)
-          .join(",");
-        query = query.or(expr);
-      }
-    }
+    // NOTE: We intentionally do not push q OR-expression into PostgREST query here,
+    // because multi-tag OR strings can become fragile. We apply keyword filtering
+    // reliably in JS below using qPhrases.
 
     if (baseLat !== null && baseLng !== null && radiusM !== null) {
       const b = bbox(baseLat, baseLng, radiusM);
@@ -2395,6 +2396,15 @@ app.get("/jobs", optionalAuth, async (req, res) => {
 
       return job;
     }).filter(Boolean);
+
+    if (qPhrases.length > 0) {
+      const needles = qPhrases.map((x) => String(x || "").toLowerCase()).filter(Boolean);
+      items = items.filter((j) => {
+        const hay = `${j.title || ""} ${j.category || ""} ${j.description || ""}`.toLowerCase();
+        // Match if any phrase tag is present.
+        return needles.some((n) => hay.includes(n));
+      });
+    }
 
     if (radiusM !== null) {
       items = items.filter((j) => typeof j.distanceM !== "number" || j.distanceM <= radiusM);
