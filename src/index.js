@@ -620,6 +620,24 @@ async function getProfile(userId) {
   return data;
 }
 
+async function findAuthUserByEmail(email) {
+  const target = String(email || "").trim().toLowerCase();
+  if (!target) return null;
+
+  const perPage = 200;
+  for (let page = 1; page <= 50; page += 1) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (error) throw new Error(error.message || "listUsers failed");
+
+    const users = data?.users || [];
+    const found = users.find((u) => String(u?.email || "").trim().toLowerCase() === target);
+    if (found) return found;
+    if (users.length < perPage) break;
+  }
+
+  return null;
+}
+
 async function requireAuth(req, res, next) {
   try {
     const header = req.headers.authorization || "";
@@ -1384,8 +1402,16 @@ app.post("/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Invalid role" });
     }
 
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    // Do not send OTP if this email already has an account.
+    const existingAuthUser = await findAuthUserByEmail(cleanEmail);
+    if (existingAuthUser) {
+      return res.status(409).json({ error: "Bu hesab (email) artıq qeydiyyatdan keçib." });
+    }
+
     const { data, error } = await supabaseAnon.auth.signInWithOtp({
-      email,
+      email: cleanEmail,
       options: {
         shouldCreateUser: true,
         data: {
@@ -1453,12 +1479,12 @@ app.post("/auth/register", async (req, res) => {
       } catch { }
     }
 
-    await logEvent("auth_register_request", otpUserId || null, { email, role, hasCompanyName: !!companyName });
+    await logEvent("auth_register_request", otpUserId || null, { email: cleanEmail, role, hasCompanyName: !!companyName });
 
     return res.json({
       ok: true,
       needsOtp: true,
-      email,
+      email: cleanEmail,
       message: "OTP sorğusu göndərildi. Əgər emaildə 6 rəqəmli kod görünmürsə, Supabase Dashboard > Auth > Email Templates > Magic Link template-inə {{ .Token }} əlavə edin. Email ümumiyyətlə gəlmirsə, Supabase-də Custom SMTP qoşmaq lazımdır (deliverability).",
       token: null,
       refreshToken: null,
