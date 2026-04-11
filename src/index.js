@@ -2194,7 +2194,7 @@ app.delete("/me/account", requireAuth, async (req, res) => {
 app.post("/me/request-role-switch", requireAuth, async (req, res) => {
   try {
     const userId = req.authUser.id;
-    const { toRole, companyName, category } = req.body || {};
+    const { toRole, companyName, category, voen } = req.body || {};
 
     if (!["seeker", "employer"].includes(toRole)) {
       return res.status(400).json({ error: "Yanlış rol" });
@@ -2258,6 +2258,7 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
 
     // ── seeker → employer (needs admin approval) ──────────────────────────────
     const cleanCompany = String(companyName || "").trim();
+    const cleanVoen = String(voen || "").replace(/\D/g, "").trim() || null;
     if (!cleanCompany) {
       return res.status(400).json({ error: "Şirkət / müəssisə adı tələb olunur" });
     }
@@ -2282,6 +2283,7 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
         to_role: toRole,
         status: "pending",
         company_name: cleanCompany,
+        voen: cleanVoen,
         category: category ? String(category).trim() : null,
       })
       .select("id")
@@ -2300,6 +2302,7 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
       toRole,
       requestId: switchReq.id,
       companyName: cleanCompany,
+      voen: cleanVoen,
     });
 
     return res.json({
