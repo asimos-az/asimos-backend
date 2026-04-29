@@ -2696,6 +2696,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         category: r.category,
         description: r.description,
         wage: r.wage,
+        views: Number(r.views || 0),
         whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
         phone: req.authUser ? (r.contact_phone ?? null) : null,
         link: req.authUser ? (r.contact_link ?? null) : null,
@@ -2832,6 +2833,7 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       category: data.category,
       description: data.description,
       wage: data.wage,
+      views: Number(data.views || 0),
       whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
       phone: req.authUser ? (data.contact_phone ?? null) : null,
       link: req.authUser ? (data.contact_link ?? null) : null,
@@ -2890,6 +2892,37 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
     }
 
     return res.json(job);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/jobs/:id/view", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const { data: currentJob, error: readError } = await supabaseAdmin
+      .from("jobs")
+      .select("id, views")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (readError) return res.status(400).json({ error: readError.message });
+    if (!currentJob) return res.status(404).json({ error: "Not found" });
+
+    const nextViews = Number(currentJob.views || 0) + 1;
+
+    const { data: updatedJob, error: updateError } = await supabaseAdmin
+      .from("jobs")
+      .update({ views: nextViews })
+      .eq("id", id)
+      .select("id, views")
+      .single();
+
+    if (updateError) return res.status(400).json({ error: updateError.message });
+
+    return res.json({ ok: true, id: updatedJob.id, views: Number(updatedJob.views || 0) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
