@@ -1098,7 +1098,20 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
 
     const { data, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    return res.json({ items: data || [], limit, offset });
+
+    let items = data || [];
+    if (items.length) {
+      const ids = items.map((item) => item.id).filter(Boolean);
+      const { data: favRows } = await supabaseAdmin
+        .from("job_favorites")
+        .select("job_id")
+        .in("job_id", ids);
+      const favCounts = new Map();
+      (favRows || []).forEach((row) => favCounts.set(String(row.job_id), (favCounts.get(String(row.job_id)) || 0) + 1));
+      items = items.map((item) => ({ ...item, favorite_count: favCounts.get(String(item.id)) || 0 }));
+    }
+
+    return res.json({ items, limit, offset });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -2231,6 +2244,105 @@ app.post("/auth/reset-password", async (req, res) => {
 });
 
 
+
+async function mapFavoriteJobRow(row) {
+  const r = row?.jobs || row?.job || row;
+  if (!r) return null;
+  const loc = {
+    lat: (typeof r.location_lat === "number" ? r.location_lat : toNum(r.location_lat)),
+    lng: (typeof r.location_lng === "number" ? r.location_lng : toNum(r.location_lng)),
+    address: r.location_address,
+  };
+  if (!isValidLatLng(loc.lat, loc.lng)) {
+    loc.lat = null;
+    loc.lng = null;
+  }
+  return {
+    id: r.id,
+    title: r.title,
+    category: r.category,
+    description: r.description,
+    wage: r.wage,
+    views: Number(r.views || 0),
+    company_name: r.company_name || null,
+    companyName: r.company_name || null,
+    imageUrl: r.image_url || null,
+    image_url: r.image_url || null,
+    logoUrl: r.image_url || null,
+    logo_url: r.image_url || null,
+    isDaily: r.is_daily,
+    jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
+    jobLevel: r.job_level || r.position_level || r.level || null,
+    job_level: r.job_level || r.position_level || r.level || null,
+    publishedAt: r.published_at || null,
+    published_at: r.published_at || null,
+    createdAt: r.created_at,
+    createdBy: r.created_by,
+    status: r.status || "open",
+    boostedUntil: r.boosted_until || null,
+    location: loc,
+    isFavorite: true,
+    is_favorite: true,
+    favoritedAt: row?.created_at || null,
+    favorited_at: row?.created_at || null,
+  };
+}
+
+app.get("/me/favorites", requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("job_favorites")
+      .select("created_at, jobs(*)")
+      .eq("user_id", req.authUser.id)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/Could not find the table|schema cache|does not exist/i.test(msg)) return res.json({ items: [] });
+      return res.status(400).json({ error: error.message });
+    }
+
+    const items = (await Promise.all((data || []).map(mapFavoriteJobRow))).filter(Boolean);
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.post("/jobs/:id/favorite", requireAuth, async (req, res) => {
+  try {
+    const jobId = String(req.params.id || "");
+    if (!jobId) return res.status(400).json({ error: "job id required" });
+
+    const { error } = await supabaseAdmin
+      .from("job_favorites")
+      .upsert({ user_id: req.authUser.id, job_id: jobId }, { onConflict: "user_id,job_id" });
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ok: true, jobId, isFavorite: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/jobs/:id/favorite", requireAuth, async (req, res) => {
+  try {
+    const jobId = String(req.params.id || "");
+    if (!jobId) return res.status(400).json({ error: "job id required" });
+
+    const { error } = await supabaseAdmin
+      .from("job_favorites")
+      .delete()
+      .eq("user_id", req.authUser.id)
+      .eq("job_id", jobId);
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ok: true, jobId, isFavorite: false });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.get("/me/notifications", requireAnyAuth, async (req, res) => {
   try {
     const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
@@ -2973,6 +3085,19 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     // JS-side pagination (applied AFTER all filtering so pages are accurate)
     const totalFiltered = items.length;
     items = items.slice(offset, offset + limit);
+
+    if (req.authUser?.id && req.authUser.id !== "admin" && items.length) {
+      const ids = items.map((item) => item.id).filter(Boolean);
+      const { data: favoriteRows, error: favoriteError } = await supabaseAdmin
+        .from("job_favorites")
+        .select("job_id")
+        .eq("user_id", req.authUser.id)
+        .in("job_id", ids);
+      if (!favoriteError) {
+        const favoriteIds = new Set((favoriteRows || []).map((row) => String(row.job_id)));
+        items = items.map((item) => ({ ...item, isFavorite: favoriteIds.has(String(item.id)), is_favorite: favoriteIds.has(String(item.id)) }));
+      }
+    }
 
     return res.json(items);
   } catch (e) {
