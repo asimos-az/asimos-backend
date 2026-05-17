@@ -511,6 +511,44 @@ function normalizeJobType(jobType, isDaily) {
   return isDaily ? "temporary" : "permanent";
 }
 
+function normalizeFilterText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/ı/g, "i")
+    .replace(/ə/g, "e")
+    .replace(/ö/g, "o")
+    .replace(/ü/g, "u")
+    .replace(/ğ/g, "g")
+    .replace(/ş/g, "s")
+    .replace(/ç/g, "c");
+}
+
+function jobTypeMatchesFilter(job, filter) {
+  const target = normalizeFilterText(filter);
+  if (!target) return true;
+  const rawType = normalizeFilterText(job.jobType || job.job_type || "");
+  const text = normalizeFilterText([job.jobType, job.job_type, job.title, job.category, job.description].filter(Boolean).join(" "));
+
+  const aliases = {
+    permanent: ["permanent", "daimi"],
+    temporary: ["temporary", "temp", "muveqqeti", "gunluk", "gundelik"],
+    seeker: ["seeker", "is axtaran"],
+    full_time: ["full_time", "full time", "tam stat", "tamştat", "tam-shtat"],
+    part_time: ["part_time", "part time", "yarim stat", "yarimştat", "yarim-shtat"],
+    freelance: ["freelance", "frilans"],
+    shift: ["shift", "novbe", "növbə"],
+    commission: ["commission", "komisyon"],
+    volunteer: ["volunteer", "konullu", "könüllü"],
+    seasonal: ["seasonal", "movsumi", "mövsümi"],
+    internship: ["internship", "tecrube", "təcrübə"],
+    scholarship: ["scholarship", "teqaud", "təqaüd"],
+  };
+
+  const candidates = aliases[target] || [target];
+  return candidates.some((item) => rawType === normalizeFilterText(item) || text.includes(normalizeFilterText(item)));
+}
+
 function computeExpiresAt(jobType, durationDays) {
   const now = Date.now();
   if (jobType === "temporary") {
@@ -1009,6 +1047,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       duration_days: body.duration_days ? Number(body.duration_days) : (is_daily ? 1 : null),
       starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
       working_hours: body.working_hours ? String(body.working_hours).trim() : null,
+      job_level: (body.job_level || body.jobLevel || body.positionLevel || body.level) ? String(body.job_level || body.jobLevel || body.positionLevel || body.level).trim() : null,
       company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
       published_at: publishedAtRaw ? new Date(publishedAtRaw).toISOString() : null,
     };
@@ -1077,6 +1116,9 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       duration_days: patch.duration_days !== undefined ? (patch.duration_days ? Number(patch.duration_days) : null) : undefined,
       starts_at: patch.starts_at !== undefined ? (patch.starts_at ? new Date(patch.starts_at).toISOString() : null) : undefined,
       working_hours: patch.working_hours !== undefined ? (patch.working_hours ? String(patch.working_hours).trim() : null) : undefined,
+      job_level: (patch.job_level !== undefined || patch.jobLevel !== undefined || patch.positionLevel !== undefined || patch.level !== undefined)
+        ? (patch.job_level || patch.jobLevel || patch.positionLevel || patch.level ? String(patch.job_level || patch.jobLevel || patch.positionLevel || patch.level).trim() : null)
+        : undefined,
       published_at: patchPublishedAt !== undefined ? (patchPublishedAt ? new Date(patchPublishedAt).toISOString() : null) : undefined,
     };
 
@@ -2585,6 +2627,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     const radiusM = toNum(req.query.radius_m) ?? null;
 
     const jobTypeFilter = req.query.jobType ? String(req.query.jobType).trim() : null;
+    const cityFilter = req.query.city ? String(req.query.city).trim() : null;
+    const jobLevelFilter = req.query.jobLevel ? String(req.query.jobLevel).trim() : null;
 
     await cleanupExpiredJobs();
     const activatedIds = await activateScheduledJobs();
@@ -2705,6 +2749,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         companyName: (r.company_name ?? null),
         isDaily: r.is_daily,
         jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
+        jobLevel: r.job_level || r.position_level || r.level || null,
+        job_level: r.job_level || r.position_level || r.level || null,
         durationDays: (r.duration_days ?? null),
         expiresAt: (r.expires_at ?? null),
         publishedAt: (r.published_at ?? null),
@@ -2730,6 +2776,21 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         }
       }
 
+      // Apply city filter by stored address text. No extra DB column is required.
+      if (cityFilter) {
+        const addressText = normalizeFilterText(job.location?.address || "");
+        if (!addressText.includes(normalizeFilterText(cityFilter))) return null;
+      }
+
+      // Apply vacancy type filter. Supports old job_type values and newer UI labels.
+      if (jobTypeFilter && !jobTypeMatchesFilter(job, jobTypeFilter)) return null;
+
+      // Apply job level filter. If a dedicated column exists, use it; otherwise fallback to title/description text.
+      if (jobLevelFilter) {
+        const levelText = normalizeFilterText([job.jobLevel, job.job_level, job.title, job.category, job.description].filter(Boolean).join(" "));
+        if (!levelText.includes(normalizeFilterText(jobLevelFilter))) return null;
+      }
+
       // Apply Wage Filter
       if (minWageParam !== null || maxWageParam !== null) {
         const w = extractWageNumber(job.wage);
@@ -2744,7 +2805,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     if (qPhrases.length > 0) {
       const needles = qPhrases.map((x) => String(x || "").toLowerCase()).filter(Boolean);
       items = items.filter((j) => {
-        const hay = `${j.title || ""} ${j.category || ""} ${j.description || ""}`.toLowerCase();
+        const hay = `${j.title || ""} ${j.companyName || ""} ${j.category || ""} ${j.description || ""} ${j.location?.address || ""}`.toLowerCase();
         return needles.some((n) => hay.includes(n));
       });
     }
@@ -2980,6 +3041,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
       voen,
       isDaily,
       jobType,
+      jobLevel,
+      positionLevel,
+      level,
       durationDays,
       notifyRadiusM,
       location,
@@ -3053,6 +3117,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       voen: voen ? String(voen).trim() : null,
       is_daily: jt === "temporary",
       job_type: jt,
+      job_level: (jobLevel || positionLevel || level) ? String(jobLevel || positionLevel || level).trim() : null,
       duration_days: dDays,
       expires_at: expiresAt,
       notify_radius_m: toNum(notifyRadiusM),
@@ -3208,6 +3273,9 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
         ? (body.contactLink || body.link ? String(body.contactLink || body.link).trim() : null)
         : undefined,
       voen: body.voen !== undefined ? (body.voen ? String(body.voen).trim() : null) : undefined,
+      job_level: (body.jobLevel !== undefined || body.job_level !== undefined || body.positionLevel !== undefined || body.level !== undefined)
+        ? (body.jobLevel || body.job_level || body.positionLevel || body.level ? String(body.jobLevel || body.job_level || body.positionLevel || body.level).trim() : null)
+        : undefined,
       notify_radius_m: body.notifyRadiusM !== undefined ? toNum(body.notifyRadiusM) : undefined,
       location_lat: locLat,
       location_lng: locLng,
@@ -3243,6 +3311,8 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       companyName: (updated.company_name ?? null),
       isDaily: updated.is_daily,
       jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
+      jobLevel: updated.job_level || updated.position_level || updated.level || null,
+      job_level: updated.job_level || updated.position_level || updated.level || null,
       durationDays: (updated.duration_days ?? null),
       expiresAt: (updated.expires_at ?? null),
       publishedAt: (updated.published_at ?? null),
