@@ -4225,6 +4225,92 @@ async function processNotificationQueue() {
 }
 
 
+
+const DEFAULT_SOCIAL_LINKS = {
+  facebook: "https://www.facebook.com/",
+  instagram: "https://www.instagram.com/asimos_az",
+  tiktok: "https://www.tiktok.com/",
+  linkedin: "https://www.linkedin.com/",
+  twitter: "https://x.com/",
+  telegram: "https://t.me/",
+};
+
+function normalizeSocialLinks(input = {}) {
+  return Object.keys(DEFAULT_SOCIAL_LINKS).reduce((acc, key) => {
+    const value = typeof input?.[key] === "string" ? input[key].trim() : "";
+    acc[key] = value;
+    return acc;
+  }, {});
+}
+
+async function readSiteSettings() {
+  const { data, error } = await supabaseAdmin
+    .from("content_pages")
+    .select("*")
+    .eq("slug", "site-settings")
+    .maybeSingle();
+
+  if (error) throw error;
+
+  let parsed = {};
+  if (data?.body) {
+    try {
+      parsed = JSON.parse(data.body);
+    } catch {
+      parsed = {};
+    }
+  }
+
+  return {
+    socialLinks: {
+      ...DEFAULT_SOCIAL_LINKS,
+      ...normalizeSocialLinks(parsed.socialLinks || {}),
+    },
+    updated_at: data?.updated_at || null,
+  };
+}
+
+app.get("/site-settings", async (req, res) => {
+  try {
+    const settings = await readSiteSettings();
+    return res.json(settings);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/admin/site-settings", requireAdmin, async (req, res) => {
+  try {
+    const settings = await readSiteSettings();
+    return res.json(settings);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/admin/site-settings", requireAdmin, async (req, res) => {
+  try {
+    const socialLinks = normalizeSocialLinks(req.body?.socialLinks || {});
+    const payload = { socialLinks };
+
+    const { data, error } = await supabaseAdmin
+      .from("content_pages")
+      .upsert({
+        slug: "site-settings",
+        title: "Site Settings",
+        body: JSON.stringify(payload),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ socialLinks, updated_at: data?.updated_at || null });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/content/:slug", async (req, res) => {
   try {
     const { slug } = req.params;
