@@ -505,9 +505,32 @@ const MS_DAY = 24 * 60 * 60 * 1000;
 
 function normalizeJobType(jobType, isDaily) {
   const raw = String(jobType || "").trim().toLowerCase();
-  if (raw === "seeker") return "seeker";
-  if (raw === "temporary" || raw === "temp" || raw.includes("müvəqqəti") || raw.includes("muveqqeti")) return "temporary";
-  if (raw === "permanent" || raw === "perm" || raw.includes("daimi")) return "permanent";
+  const allowed = new Set([
+    "seeker",
+    "permanent",
+    "temporary",
+    "full_time",
+    "part_time",
+    "freelance",
+    "shift",
+    "commission",
+    "volunteer",
+    "seasonal",
+    "internship",
+    "scholarship",
+  ]);
+  if (allowed.has(raw)) return raw;
+  if (raw === "temp" || raw.includes("müvəqqəti") || raw.includes("muveqqeti")) return "temporary";
+  if (raw === "perm" || raw.includes("daimi")) return "permanent";
+  if (raw.includes("tam ştat") || raw.includes("tam stat") || raw.includes("full time")) return "full_time";
+  if (raw.includes("yarım ştat") || raw.includes("yarim stat") || raw.includes("part time")) return "part_time";
+  if (raw.includes("frilans") || raw.includes("freelance")) return "freelance";
+  if (raw.includes("növbə") || raw.includes("novbe") || raw.includes("shift")) return "shift";
+  if (raw.includes("komisyon") || raw.includes("commission")) return "commission";
+  if (raw.includes("könüllü") || raw.includes("konullu") || raw.includes("volunteer")) return "volunteer";
+  if (raw.includes("mövsümi") || raw.includes("movsumi") || raw.includes("seasonal")) return "seasonal";
+  if (raw.includes("təcrübə") || raw.includes("tecrube") || raw.includes("intern")) return "internship";
+  if (raw.includes("təqaüd") || raw.includes("teqaud") || raw.includes("scholar")) return "scholarship";
   return isDaily ? "temporary" : "permanent";
 }
 
@@ -1043,13 +1066,14 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
-      job_type: is_daily ? "temporary" : "permanent",
+      job_type: normalizeJobType(body.job_type || body.jobType, is_daily),
       duration_days: body.duration_days ? Number(body.duration_days) : (is_daily ? 1 : null),
       starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
       working_hours: body.working_hours ? String(body.working_hours).trim() : null,
       job_level: (body.job_level || body.jobLevel || body.positionLevel || body.level) ? String(body.job_level || body.jobLevel || body.positionLevel || body.level).trim() : null,
       company_name: (body.company_name || body.companyName) ? String(body.company_name || body.companyName).trim() : null,
       published_at: publishedAtRaw ? new Date(publishedAtRaw).toISOString() : null,
+      image_url: (body.image_url || body.imageUrl || body.logo_url || body.logoUrl) ? String(body.image_url || body.imageUrl || body.logo_url || body.logoUrl).trim() : null,
     };
 
     if (insertRow.status === "open" && insertRow.published_at && new Date(insertRow.published_at) > new Date()) {
@@ -1120,6 +1144,9 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
         ? (patch.job_level || patch.jobLevel || patch.positionLevel || patch.level ? String(patch.job_level || patch.jobLevel || patch.positionLevel || patch.level).trim() : null)
         : undefined,
       published_at: patchPublishedAt !== undefined ? (patchPublishedAt ? new Date(patchPublishedAt).toISOString() : null) : undefined,
+      image_url: (patch.image_url !== undefined || patch.imageUrl !== undefined || patch.logo_url !== undefined || patch.logoUrl !== undefined)
+        ? (patch.image_url || patch.imageUrl || patch.logo_url || patch.logoUrl ? String(patch.image_url || patch.imageUrl || patch.logo_url || patch.logoUrl).trim() : null)
+        : undefined,
     };
 
     // Scheduled publish logic: if admin sets status=open but published_at is in the future, set status=scheduled instead
@@ -2747,6 +2774,10 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         voen: (r.voen ?? null),
         company_name: (r.company_name ?? null),
         companyName: (r.company_name ?? null),
+        imageUrl: r.image_url || null,
+        image_url: r.image_url || null,
+        logoUrl: r.image_url || null,
+        logo_url: r.image_url || null,
         isDaily: r.is_daily,
         jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
         jobLevel: r.job_level || r.position_level || r.level || null,
@@ -2814,8 +2845,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       items = items.filter((j) => typeof j.distanceM !== "number" || j.distanceM <= radiusM);
     }
 
-    if (!profile || profile?.role === "seeker") {
-      items = items.filter((j) => String(j.status || "open").toLowerCase() !== "closed");
+    if (!createdBy && (!profile || profile?.role === "seeker")) {
+      items = items.filter((j) => !["closed", "draft", "deleted"].includes(String(j.status || "open").toLowerCase()));
     }
 
     // Patch status for jobs activated just now (guard against read-after-write lag)
@@ -2901,6 +2932,10 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       voen: (data.voen ?? null),
       company_name: (data.company_name ?? null),
       companyName: (data.company_name ?? null),
+      imageUrl: data.image_url || null,
+      image_url: data.image_url || null,
+      logoUrl: data.image_url || null,
+      logo_url: data.image_url || null,
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
       durationDays: (data.duration_days ?? null),
@@ -3053,6 +3088,12 @@ app.post("/jobs", requireAuth, async (req, res) => {
       publishedAt,
       publish_at,
       publishAt,
+      image_url,
+      imageUrl,
+      logo_url,
+      logoUrl,
+      saveAsDraft,
+      status,
     } = req.body || {};
 
     if (!title) return res.status(400).json({ error: "Title required" });
@@ -3097,12 +3138,15 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    let initialStatus = "pending"; 
-    if (req.authUser.is_admin || req.authUser.role === "admin") {
-      initialStatus = "open";
-    }
+    const requestedStatus = String(status || "").toLowerCase();
+    let initialStatus = saveAsDraft || requestedStatus === "draft" ? "draft" : "open";
+    if (requestedStatus === "pending") initialStatus = "pending";
+    if (requestedStatus === "scheduled") initialStatus = "scheduled";
 
     const selectedPublishAt = published_at || publishedAt || publish_at || publishAt;
+    if (initialStatus === "open" && selectedPublishAt && new Date(selectedPublishAt) > new Date()) {
+      initialStatus = "scheduled";
+    }
 
     const payload = {
       created_by: req.authUser.id,
@@ -3126,6 +3170,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location_address: locAddr,
       company_name: (company_name || companyName) ? String(company_name || companyName).trim() : null,
       published_at: selectedPublishAt ? new Date(selectedPublishAt).toISOString() : null,
+      image_url: (image_url || imageUrl || logo_url || logoUrl) ? String(image_url || imageUrl || logo_url || logoUrl).trim() : null,
     };
 
     let data = null;
@@ -3139,13 +3184,15 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     if (error) {
       const msg = String(error.message || "");
-      if (/column .*\b(job_type|duration_days|expires_at|status|published_at)\b/i.test(msg)) {
+      if (/column .*\b(job_type|duration_days|expires_at|status|published_at|job_level|image_url)\b/i.test(msg)) {
         const fallback = { ...payload };
         fallback.job_type = undefined;
         fallback.duration_days = undefined;
         fallback.expires_at = undefined;
         fallback.status = undefined;
         fallback.published_at = undefined;
+        fallback.job_level = undefined;
+        fallback.image_url = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -3171,6 +3218,10 @@ app.post("/jobs", requireAuth, async (req, res) => {
       voen: data.voen ?? null,
       company_name: (data.company_name ?? null),
       companyName: (data.company_name ?? null),
+      imageUrl: data.image_url || null,
+      image_url: data.image_url || null,
+      logoUrl: data.image_url || null,
+      logo_url: data.image_url || null,
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
       durationDays: (data.duration_days ?? null),
@@ -3280,6 +3331,9 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       location_lat: locLat,
       location_lng: locLng,
       location_address: locAddr,
+      image_url: (body.imageUrl !== undefined || body.image_url !== undefined || body.logoUrl !== undefined || body.logo_url !== undefined)
+        ? (body.imageUrl || body.image_url || body.logoUrl || body.logo_url ? String(body.imageUrl || body.image_url || body.logoUrl || body.logo_url).trim() : null)
+        : undefined,
     };
 
     if (existing.status === "rejected") {
@@ -3309,6 +3363,10 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       voen: updated.voen ?? null,
       company_name: (updated.company_name ?? null),
       companyName: (updated.company_name ?? null),
+      imageUrl: updated.image_url || null,
+      image_url: updated.image_url || null,
+      logoUrl: updated.image_url || null,
+      logo_url: updated.image_url || null,
       isDaily: updated.is_daily,
       jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
       jobLevel: updated.job_level || updated.position_level || updated.level || null,
@@ -3329,6 +3387,49 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
 
     await logEvent("job_update_self", req.authUser.id, { job_id: id, role: profile.role });
     return res.json(job);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+
+app.patch("/jobs/:id/publish", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can publish jobs" });
+    const { data: existing, error: readErr } = await supabaseAdmin.from("jobs").select("*").eq("id", id).maybeSingle();
+    if (readErr) return res.status(400).json({ error: readErr.message });
+    if (!existing) return res.status(404).json({ error: "Not found" });
+    if (existing.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+    const expiresAt = computeExpiresAt(existing.job_type || (existing.is_daily ? "temporary" : "permanent"), existing.duration_days || 1);
+    const { data, error } = await supabaseAdmin
+      .from("jobs")
+      .update({ status: "open", closed_at: null, closed_reason: null, rejection_reason: null, published_at: new Date().toISOString(), expires_at: expiresAt })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("job_publish", req.authUser.id, { job_id: id });
+    return res.json({ ok: true, job: data });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/jobs/:id", requireAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    const profile = await getProfile(req.authUser.id);
+    if (profile?.role !== "employer") return res.status(403).json({ error: "Only employer can delete jobs" });
+    const { data: existing, error: readErr } = await supabaseAdmin.from("jobs").select("id, created_by").eq("id", id).maybeSingle();
+    if (readErr) return res.status(400).json({ error: readErr.message });
+    if (!existing) return res.status(404).json({ error: "Not found" });
+    if (existing.created_by !== req.authUser.id) return res.status(403).json({ error: "Forbidden" });
+    const { error } = await supabaseAdmin.from("jobs").update({ status: "deleted", closed_at: new Date().toISOString(), closed_reason: "deleted_by_owner" }).eq("id", id);
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("job_delete", req.authUser.id, { job_id: id });
+    return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -4296,6 +4397,84 @@ async function processNotificationQueue() {
 
 
 
+
+const DEFAULT_JOB_FILTER_OPTIONS = {
+  vacancyTypes: [
+    { label: "Növbə əsasında", value: "shift" },
+    { label: "Tam ştat", value: "full_time" },
+    { label: "Daimi", value: "permanent" },
+    { label: "Frilans", value: "freelance" },
+    { label: "Komisyon haqqı", value: "commission" },
+    { label: "Könüllü", value: "volunteer" },
+    { label: "Mövsümi", value: "seasonal" },
+    { label: "Müvəqqəti", value: "temporary" },
+    { label: "Təcrübə", value: "internship" },
+    { label: "Təqaüd proqramı", value: "scholarship" },
+    { label: "Yarım ştat", value: "part_time" },
+  ],
+  jobLevels: [
+    { label: "Təcrübəsiz", value: "entry" },
+    { label: "Junior", value: "junior" },
+    { label: "Middle", value: "middle" },
+    { label: "Senior", value: "senior" },
+    { label: "Menecer", value: "manager" },
+    { label: "Rəhbər", value: "lead" },
+  ],
+  salaryRanges: [
+    { label: "0 - 500 AZN", min: "0", max: "500" },
+    { label: "500 - 1000 AZN", min: "500", max: "1000" },
+    { label: "1000 - 1500 AZN", min: "1000", max: "1500" },
+    { label: "1500 - 2500 AZN", min: "1500", max: "2500" },
+    { label: "2500+ AZN", min: "2500", max: "" },
+  ],
+};
+
+function cleanFilterItems(items = [], withRange = false) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => {
+      if (typeof item === "string") {
+        const label = item.trim();
+        return label ? { label, value: label.toLowerCase().replace(/\s+/g, "_") } : null;
+      }
+      const label = String(item?.label || "").trim();
+      const value = String(item?.value || label).trim();
+      if (!label || !value) return null;
+      const next = { label, value };
+      if (withRange) {
+        next.min = item?.min !== undefined && item?.min !== null ? String(item.min).trim() : "";
+        next.max = item?.max !== undefined && item?.max !== null ? String(item.max).trim() : "";
+      }
+      return next;
+    })
+    .filter(Boolean);
+}
+
+function normalizeJobFilterOptions(input = {}) {
+  const vacancyTypes = cleanFilterItems(input.vacancyTypes || input.vacancy_types || input.types);
+  const jobLevels = cleanFilterItems(input.jobLevels || input.job_levels || input.levels);
+  const salaryRanges = cleanFilterItems(input.salaryRanges || input.salary_ranges || input.salaries, true);
+  return {
+    vacancyTypes: vacancyTypes.length ? vacancyTypes : DEFAULT_JOB_FILTER_OPTIONS.vacancyTypes,
+    jobLevels: jobLevels.length ? jobLevels : DEFAULT_JOB_FILTER_OPTIONS.jobLevels,
+    salaryRanges: salaryRanges.length ? salaryRanges : DEFAULT_JOB_FILTER_OPTIONS.salaryRanges,
+  };
+}
+
+async function readJobFilterOptions() {
+  const { data, error } = await supabaseAdmin
+    .from("content_pages")
+    .select("*")
+    .eq("slug", "job-filter-options")
+    .maybeSingle();
+  if (error) throw error;
+  let parsed = {};
+  if (data?.body) {
+    try { parsed = JSON.parse(data.body); } catch { parsed = {}; }
+  }
+  return { ...normalizeJobFilterOptions(parsed), updated_at: data?.updated_at || null };
+}
+
 const DEFAULT_SOCIAL_LINKS = {
   facebook: "https://www.facebook.com/",
   instagram: "https://www.instagram.com/asimos_az",
@@ -4339,6 +4518,45 @@ async function readSiteSettings() {
     updated_at: data?.updated_at || null,
   };
 }
+
+
+app.get("/job-filter-options", async (req, res) => {
+  try {
+    const options = await readJobFilterOptions();
+    return res.json(options);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/admin/job-filter-options", requireAdmin, async (req, res) => {
+  try {
+    const options = await readJobFilterOptions();
+    return res.json(options);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/admin/job-filter-options", requireAdmin, async (req, res) => {
+  try {
+    const options = normalizeJobFilterOptions(req.body || {});
+    const { data, error } = await supabaseAdmin
+      .from("content_pages")
+      .upsert({
+        slug: "job-filter-options",
+        title: "Job Filter Options",
+        body: JSON.stringify(options),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ ...options, updated_at: data?.updated_at || null });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 app.get("/site-settings", async (req, res) => {
   try {
