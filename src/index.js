@@ -85,6 +85,65 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+
+
+app.post("/analytics/visit", requireAnyAuthOptional, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const userId = req.authUser?.id || null;
+    const sessionId = body.sessionId ? String(body.sessionId).slice(0, 120) : null;
+    const pathValue = body.path ? String(body.path).slice(0, 500) : null;
+    const userAgent = String(req.headers["user-agent"] || "").slice(0, 500);
+
+    if (userId) {
+      await supabaseAdmin.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("id", userId);
+    }
+
+    const { error } = await supabaseAdmin.from("site_visits").insert({
+      user_id: userId,
+      session_id: sessionId,
+      path: pathValue,
+      user_agent: userAgent,
+    });
+
+    if (error && !/schema cache|does not exist|Could not find/i.test(String(error.message || ""))) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.json({ ok: true });
+  }
+});
+
+app.get("/site-stats", async (req, res) => {
+  try {
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const onlineSince = new Date(now.getTime() - 15 * 60 * 1000);
+
+    const [usersRes, jobsRes, onlineRes, todayRes, monthRes] = await Promise.all([
+      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }),
+      supabaseAdmin.from("jobs").select("id", { count: "exact", head: true }).in("status", ["open", "pending", "scheduled"]),
+      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).gte("last_seen_at", onlineSince.toISOString()),
+      supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", todayStart.toISOString()),
+      supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", monthStart.toISOString()),
+    ]);
+
+    return res.json({
+      users: usersRes.count || 0,
+      activeJobs: jobsRes.count || 0,
+      onlineUsers: onlineRes.error ? 0 : (onlineRes.count || 0),
+      visitsToday: todayRes.error ? 0 : (todayRes.count || 0),
+      visitsThisMonth: monthRes.error ? 0 : (monthRes.count || 0),
+    });
+  } catch (e) {
+    return res.json({ users: 0, activeJobs: 0, onlineUsers: 0, visitsToday: 0, visitsThisMonth: 0 });
+  }
+});
+
 app.get("/admin/debug-smtp", (req, res) => {
   res.json({
     SMTP_HOST: SMTP_HOST ? "Configured (" + SMTP_HOST + ")" : "MISSING",
@@ -240,6 +299,20 @@ async function logEvent(type, actorId, metadata) {
 
   } catch (e) {
     console.error("Log event error:", e.message);
+  }
+}
+
+
+
+async function safeInsertAdminEvent(type, metadata = {}) {
+  try {
+    await supabaseAdmin.from("events").insert({
+      type,
+      actor_id: null,
+      metadata,
+    });
+  } catch (e) {
+    console.error("Admin event insert failed:", e.message);
   }
 }
 
@@ -752,6 +825,27 @@ async function optionalAuth(req, res, next) {
   } catch {
     req.authUser = null;
     req.accessToken = null;
+    return next();
+  }
+}
+
+
+async function requireAnyAuthOptional(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return next();
+    const adminPayload = verifyAdminToken(token);
+    if (adminPayload) {
+      req.authUser = { id: "admin", email: adminPayload.email || ADMIN_EMAIL, is_admin: true };
+      return next();
+    }
+    const { data } = await supabaseAdmin.auth.getUser(token);
+    if (data?.user) {
+      req.authUser = data.user;
+    }
+    return next();
+  } catch {
     return next();
   }
 }
@@ -3832,10 +3926,12 @@ app.post("/support", requireAnyAuth, async (req, res) => {
 
     // Notify Telegram
     await logEvent("support_ticket", req.authUser.id, {
+      ticketId: ticket.id,
       subject: ticket.subject,
       email: req.authUser.email,
       category: category || "Dəstək",
-      message: message
+      message: message,
+      status: "open"
     });
 
     return res.json({ ok: true, ticket });
@@ -3897,6 +3993,8 @@ app.post("/support/:id/reply", requireAnyAuth, async (req, res) => {
 
     // Update status to open if it was closed or replied
     await supabaseAdmin.from("support_tickets").update({ status: "open", is_answered: false }).eq("id", id);
+
+    await logEvent("support_ticket", req.authUser.id, { ticketId: id, subject: "Dəstək cavabı", email: req.authUser.email, message, status: "open" });
 
     return res.json({ ok: true });
   } catch (e) {
