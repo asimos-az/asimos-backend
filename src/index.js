@@ -5205,30 +5205,105 @@ app.post("/ai/check-job-risk", requireAuth, async (req, res) => {
   }
 });
 
-app.post("/ai/match-jobs", optionalAuth, async (req, res) => {
+function extractAiJobSearchCriteria(input = {}) {
+  const query = cleanAiText(input.query || input.prompt || input.text || "").toLowerCase();
+  const facts = extractJobFactsFromPrompt(query);
+  const criteria = { query, ...facts };
+
+  const salaryRange = query.match(/(?:maaş|maas|salary)?\s*(\d{2,5})\s*(?:-|–|—|ilə|ile|arası|arasi)\s*(\d{2,5})/i);
+  const minSalary = query.match(/(?:minimum|min|ən az|en az|maaş|maas)\s*(\d{2,5})/i) || query.match(/(\d{2,5})\s*\+\s*(?:azn|manat)?/i);
+  if (salaryRange) {
+    criteria.minWage = Number(salaryRange[1]);
+    criteria.maxWage = Number(salaryRange[2]);
+  } else if (minSalary) {
+    criteria.minWage = Number(minSalary[1]);
+  }
+
+  if (/ofisiant|ofisant|waiter/.test(query)) criteria.keyword = "ofisiant";
+  else if (/satıcı|satici|satış|satis/.test(query)) criteria.keyword = "sat";
+  else if (/kuryer|courier/.test(query)) criteria.keyword = "kuryer";
+  else if (/operator/.test(query)) criteria.keyword = "operator";
+
+  return criteria;
+}
+
+function parseJobWageRange(wageText = "") {
+  const raw = String(wageText || "").replace(/,/g, ".");
+  const nums = [...raw.matchAll(/\d+(?:\.\d+)?/g)].map((m) => Number(m[0])).filter(Number.isFinite);
+  if (!nums.length) return { min: null, max: null };
+  if (nums.length === 1) return { min: nums[0], max: nums[0] };
+  return { min: Math.min(nums[0], nums[1]), max: Math.max(nums[0], nums[1]) };
+}
+
+app.post("/ai/match-jobs", requireAuth, async (req, res) => {
   try {
-    const query = cleanAiText(req.body?.query || req.body?.prompt || "").toLowerCase();
-    const city = cleanAiText(req.body?.city || "").toLowerCase();
+    const criteria = extractAiJobSearchCriteria(req.body || {});
+    const query = criteria.query || "";
+    const city = cleanAiText(req.body?.city || criteria.city || "").toLowerCase();
     const { data: jobs, error } = await supabaseAdmin
       .from("jobs")
       .select("*")
       .in("status", ["open", "active"])
       .order("created_at", { ascending: false })
-      .limit(80);
+      .limit(120);
     if (error) throw new Error(error.message);
-    const words = query.split(/\s+/).filter((w) => w.length > 2);
+
+    const words = query.split(/\s+/).filter((w) => w.length > 2 && !["axtariram", "axtarıram", "lazim", "lazımdır", "maas", "maaş", "manat", "azn"].includes(w));
     const scored = (jobs || []).map((job) => {
-      const haystack = `${job.title || ""} ${job.description || ""} ${job.category || ""} ${job.wage || ""} ${job.location?.address || ""}`.toLowerCase();
-      let score = 20;
-      for (const w of words) if (haystack.includes(w)) score += 12;
-      if (city && haystack.includes(city)) score += 20;
-      if (query.includes("yarım") && [job.job_type, job.jobType].includes("part_time")) score += 15;
-      if (query.includes("təcrübəsiz") && [job.job_level, job.jobLevel].includes("entry")) score += 15;
-      return { job, score: Math.min(score, 98) };
-    }).sort((a, b) => b.score - a.score).slice(0, 10);
+      const address = job.location?.address || job.location_text || job.city || "";
+      const haystack = `${job.title || ""} ${job.description || ""} ${job.category || ""} ${job.wage || ""} ${address}`.toLowerCase();
+      let score = 10;
+      const reasons = [];
+
+      for (const w of words) {
+        if (haystack.includes(w)) score += 8;
+      }
+
+      if (criteria.keyword && haystack.includes(criteria.keyword)) {
+        score += 25;
+        reasons.push("vəzifə adı uyğundur");
+      }
+      if (city && haystack.includes(city)) {
+        score += 18;
+        reasons.push("şəhər/lokasiya uyğundur");
+      }
+      if (criteria.jobType && String(job.job_type || job.jobType || "").toLowerCase() === String(criteria.jobType).toLowerCase()) {
+        score += 15;
+        reasons.push("iş rejimi uyğundur");
+      }
+      if (criteria.jobLevel && String(job.job_level || job.jobLevel || "").toLowerCase() === String(criteria.jobLevel).toLowerCase()) {
+        score += 12;
+        reasons.push("təcrübə səviyyəsi uyğundur");
+      }
+
+      const wageRange = parseJobWageRange(job.wage || job.salary || "");
+      if (criteria.minWage && wageRange.max && wageRange.max >= criteria.minWage) {
+        score += 14;
+        reasons.push("maaş istəyə uyğundur");
+      }
+      if (criteria.maxWage && wageRange.min && wageRange.min <= criteria.maxWage) {
+        score += 6;
+      }
+
+      return { job, score: Math.min(score, 98), reasons };
+    })
+      .filter((item) => item.score >= 18)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
+
     return res.json({
-      summary: "Sizə uyğun elanlar tapıldı.",
-      items: scored.map(({ job, score }) => ({ id: job.id, title: job.title, companyName: job.company_name || job.companyName, location: job.location?.address || "", matchPercent: score, reason: "Axtarış mətninizə uyğunluq" }))
+      summary: scored.length ? "AI axtarışınıza uyğun elanları tapdı." : "Bu axtarışa uyğun elan tapılmadı.",
+      criteria,
+      items: scored.map(({ job, score, reasons }) => ({
+        id: job.id,
+        title: job.title,
+        companyName: job.company_name || job.companyName || job.company || "Asimos",
+        location: job.location?.address || job.location_text || job.city || "",
+        wage: job.wage || job.salary || "",
+        category: job.category || "",
+        matchPercent: score,
+        reason: reasons.length ? reasons.join(", ") : "Axtarış mətninizə uyğunluq"
+      }))
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
