@@ -1316,15 +1316,26 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
         : undefined,
     };
 
-    // Scheduled publish logic: if admin sets status=open but published_at is in the future, set status=scheduled instead
+    // Scheduled publish logic: if admin approves with future published_at, keep it scheduled.
+    // If admin approves now, make it public immediately and start the 28-day lifetime.
     if (patch.status === "open") {
-      const { data: currentJob } = await supabaseAdmin.from("jobs").select("published_at").eq("id", id).single();
+      const { data: currentJob } = await supabaseAdmin
+        .from("jobs")
+        .select("published_at, job_type, is_daily, duration_days, expires_at")
+        .eq("id", id)
+        .single();
       const publishAt = patchPublishedAt ? new Date(patchPublishedAt) : (currentJob?.published_at ? new Date(currentJob.published_at) : null);
       if (publishAt && publishAt > new Date()) {
         allowed.status = "scheduled";
+        if (!allowed.published_at) allowed.published_at = publishAt.toISOString();
       } else {
         allowed.status = "open";
+        allowed.published_at = new Date().toISOString();
+        allowed.expires_at = computeExpiresAt(currentJob?.job_type || (currentJob?.is_daily ? "temporary" : "permanent"), currentJob?.duration_days || 1);
       }
+      allowed.rejection_reason = null;
+      allowed.closed_at = null;
+      allowed.closed_reason = null;
     } else if (patch.status !== undefined) {
       allowed.status = patch.status;
     }
@@ -3578,11 +3589,26 @@ app.post("/jobs", requireAuth, async (req, res) => {
     });
 
     if (job.status === "pending") {
-       notifyAdmins(
-         "Yeni Elan (Təsdiq gözləyir)",
-         `${req.authUser.fullName || "İşəgötürən"} yeni elan yerləşdirdi: "${job.title}"`,
-         { type: "new_job", id: job.id }
-       ).catch(console.error);
+      await insertNotifications([{
+        user_id: req.authUser.id,
+        title: "Elan təsdiqə göndərildi",
+        body: `"${job.title}" adlı elanınız admin yoxlamasına göndərildi. Təsdiqləndikdən sonra yayımlanacaq.`,
+        data: { type: "job_pending", jobId: job.id, status: "pending" }
+      }]).catch(console.error);
+
+      await logEvent("job_approval_pending", req.authUser.id, {
+        job_id: job.id,
+        title: job.title,
+        category: job.category,
+        status: "pending",
+        action: "create",
+      });
+
+      notifyAdmins(
+        "Yeni elan təsdiq gözləyir",
+        `${profile?.full_name || profile?.fullName || req.authUser.fullName || "İşçi axtaran"} yeni elan yerləşdirdi: "${job.title}"`,
+        { type: "job_approval_pending", jobId: job.id, id: job.id, action: "create" }
+      ).catch(console.error);
     }
 
     // Do not notify job seekers until admin approves the job.
@@ -3701,6 +3727,23 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       .single();
     if (upErr) return res.status(400).json({ error: upErr.message });
 
+    if (String(updated.status || "").toLowerCase() === "pending") {
+      await insertNotifications([{
+        user_id: req.authUser.id,
+        title: "Dəyişikliklər təsdiqə göndərildi",
+        body: `"${updated.title}" adlı elanınız redaktədən sonra admin yoxlamasına göndərildi. Təsdiqləndikdən sonra yayımlanacaq.`,
+        data: { type: "job_edit_pending", jobId: updated.id, status: "pending" }
+      }]).catch(console.error);
+
+      await logEvent("job_edit_pending", req.authUser.id, {
+        job_id: updated.id,
+        title: updated.title,
+        category: updated.category,
+        status: "pending",
+        action: "edit",
+      });
+    }
+
     const job = {
       id: updated.id,
       title: updated.title,
@@ -3767,9 +3810,19 @@ app.patch("/jobs/:id/publish", requireAuth, async (req, res) => {
     await logEvent("job_publish_request", req.authUser.id, { job_id: id });
     notifyAdmins(
       "Elan aktivləşdirmə sorğusu",
-      `${profile.full_name || profile.fullName || "İşəgötürən"} elanı aktivləşdirmək istəyir: "${existing.title}"`,
-      { type: "job_publish_pending", id }
+      `${profile.full_name || profile.fullName || "İşçi axtaran"} elanı aktivləşdirmək istəyir: "${existing.title}"`,
+      { type: "job_publish_pending", id, jobId: id, action: "publish" }
     ).catch(console.error);
+
+    await insertNotifications([{
+      user_id: req.authUser.id,
+      title: "Elan təsdiqə göndərildi",
+      body: `"${existing.title}" adlı elanınız admin yoxlamasına göndərildi. Təsdiqləndikdən sonra yayımlanacaq.`,
+      data: { type: "job_publish_pending", jobId: id, status: "pending" }
+    }]).catch(console.error);
+
+    await logEvent("job_publish_pending", req.authUser.id, { job_id: id, title: existing.title, status: "pending", action: "publish" });
+
     return res.json({ ok: true, job: data, pendingApproval: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
