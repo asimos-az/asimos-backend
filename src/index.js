@@ -5206,23 +5206,32 @@ app.post("/ai/check-job-risk", requireAuth, async (req, res) => {
 });
 
 function extractAiJobSearchCriteria(input = {}) {
-  const query = cleanAiText(input.query || input.prompt || input.text || "").toLowerCase();
+  const query = cleanAiText(input.query || input.prompt || input.text || input.keyword || "").toLowerCase();
   const facts = extractJobFactsFromPrompt(query);
   const criteria = { query, ...facts };
 
+  if (input.keyword) criteria.keyword = cleanAiText(input.keyword).toLowerCase();
+  if (input.city) criteria.city = cleanAiText(input.city);
+  if (input.jobType) criteria.jobType = cleanAiText(input.jobType);
+  if (input.jobLevel) criteria.jobLevel = cleanAiText(input.jobLevel);
+  if (input.minWage || input.minSalary) criteria.minWage = Number(input.minWage || input.minSalary);
+  if (input.maxWage || input.maxSalary) criteria.maxWage = Number(input.maxWage || input.maxSalary);
+
   const salaryRange = query.match(/(?:maaş|maas|salary)?\s*(\d{2,5})\s*(?:-|–|—|ilə|ile|arası|arasi)\s*(\d{2,5})/i);
   const minSalary = query.match(/(?:minimum|min|ən az|en az|maaş|maas)\s*(\d{2,5})/i) || query.match(/(\d{2,5})\s*\+\s*(?:azn|manat)?/i);
-  if (salaryRange) {
+  if (!criteria.minWage && salaryRange) {
     criteria.minWage = Number(salaryRange[1]);
     criteria.maxWage = Number(salaryRange[2]);
-  } else if (minSalary) {
+  } else if (!criteria.minWage && minSalary) {
     criteria.minWage = Number(minSalary[1]);
   }
 
-  if (/ofisiant|ofisant|waiter/.test(query)) criteria.keyword = "ofisiant";
-  else if (/satıcı|satici|satış|satis/.test(query)) criteria.keyword = "sat";
-  else if (/kuryer|courier/.test(query)) criteria.keyword = "kuryer";
-  else if (/operator/.test(query)) criteria.keyword = "operator";
+  if (!criteria.keyword) {
+    if (/ofisiant|ofisant|waiter/.test(query)) criteria.keyword = "ofisiant";
+    else if (/satıcı|satici|satış|satis/.test(query)) criteria.keyword = "sat";
+    else if (/kuryer|courier/.test(query)) criteria.keyword = "kuryer";
+    else if (/operator/.test(query)) criteria.keyword = "operator";
+  }
 
   return criteria;
 }
