@@ -4982,3 +4982,216 @@ app.put("/admin/content/:slug", async (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 });
+// -----------------------------
+// Asimos AI helper endpoints
+// -----------------------------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+function cleanAiText(value, max = 4000) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function getOptionLabel(options = [], value) {
+  const raw = String(value || "").toLowerCase();
+  const found = (options || []).find((item) => String(item?.value || item?.label || "").toLowerCase() === raw);
+  return found?.label || value || "";
+}
+
+function firstOptionValue(options = [], fallback = "") {
+  return options?.[0]?.value || options?.[0]?.label || fallback;
+}
+
+function extractJsonObject(text = "") {
+  const source = String(text || "").trim();
+  try { return JSON.parse(source); } catch {}
+  const start = source.indexOf("{");
+  const end = source.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(source.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
+
+async function callOpenAIJson({ system, user, fallback }) {
+  if (!OPENAI_API_KEY) return { ...fallback, aiProvider: "fallback", note: "OPENAI_API_KEY yoxdur; lokal qayda əsaslı cavab qaytarıldı." };
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.35,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    return { ...fallback, aiProvider: "fallback", note: data?.error?.message || "AI servisi müvəqqəti cavab vermədi." };
+  }
+  const parsed = extractJsonObject(data?.choices?.[0]?.message?.content || "");
+  return parsed || { ...fallback, aiProvider: "fallback", note: "AI cavabı JSON formatında gəlmədi." };
+}
+
+function buildFallbackJob(payload = {}, filterOptions = {}) {
+  const prompt = cleanAiText(payload.prompt || payload.description || payload.title || "Elan");
+  const lower = prompt.toLowerCase();
+  const vacancyTypes = filterOptions.vacancyTypes || DEFAULT_JOB_FILTER_OPTIONS.vacancyTypes || [];
+  const levels = filterOptions.jobLevels || DEFAULT_JOB_FILTER_OPTIONS.jobLevels || [];
+  const category = payload.category || (lower.includes("sat") ? "Satış və Müştəri Xidmətləri" : lower.includes("kuryer") ? "Çatdırılma" : "Ümumi");
+  const jobType = payload.jobType || (lower.includes("yarım") ? "part_time" : lower.includes("frilans") ? "freelance" : firstOptionValue(vacancyTypes, "full_time"));
+  const jobLevel = payload.jobLevel || (lower.includes("təcrübə") || lower.includes("tecrube") ? "entry" : firstOptionValue(levels, "entry"));
+  const title = payload.title || (lower.includes("kuryer") ? "Kuryer" : lower.includes("operator") ? "Operator" : lower.includes("sat") ? "Satış təmsilçisi" : "Yeni vakansiya");
+  const companyName = payload.companyName || payload.company_name || "Şirkət";
+  const wage = payload.wage || payload.salary || "Razılaşma yolu ilə";
+  const city = payload.city || payload.location || "Bakı";
+  return {
+    job: {
+      title,
+      companyName,
+      wage,
+      city,
+      category,
+      jobType,
+      jobLevel,
+      description: `${title} vəzifəsi üzrə namizəd axtarılır. Namizəd məsuliyyətli, punktual və komanda ilə işləməyi bacaran olmalıdır. İş yeri: ${city}. Maaş: ${wage}.`,
+      requirements: ["Məsuliyyətli olmaq", "Ünsiyyət bacarığı", "Punktual olmaq"],
+    },
+    summary: "Elan mətni qayda əsaslı formalaşdırıldı.",
+  };
+}
+
+async function getAiFilterOptions() {
+  try { return await readJobFilterOptions(); } catch { return DEFAULT_JOB_FILTER_OPTIONS; }
+}
+
+app.post("/ai/generate-job", requireAuth, async (req, res) => {
+  try {
+    const filterOptions = req.body?.filterOptions || await getAiFilterOptions();
+    const fallback = buildFallbackJob(req.body || {}, filterOptions);
+    const system = "Sən Asimos.az üçün Azərbaycan dilində peşəkar iş elanı hazırlayan AI köməkçisən. Yalnız JSON qaytar. JSON formatı: {job:{title,companyName,wage,city,category,jobType,jobLevel,description,requirements:[string]},summary}. jobType və jobLevel dəyərlərini verilən filter option value-larından seç. Mətnlər qısa, real və şişirdilməmiş olsun.";
+    const user = JSON.stringify({ input: req.body || {}, filterOptions });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/improve-job", requireAuth, async (req, res) => {
+  try {
+    const filterOptions = req.body?.filterOptions || await getAiFilterOptions();
+    const fallbackJob = buildFallbackJob(req.body || {}, filterOptions).job;
+    const fallback = { job: fallbackJob, description: fallbackJob.description, summary: "Təsvir yaxşılaşdırıldı." };
+    const system = "Sən Asimos.az üçün iş elanını səliqəli və etibarlı Azərbaycan dilinə çevirən redaktorsan. Yalnız JSON qaytar: {job:{title,companyName,wage,city,category,jobType,jobLevel,description,requirements:[string]}, description, summary}. Məlumat uydurma, yalnız verilən konteksti genişləndir.";
+    const user = JSON.stringify({ input: req.body || {}, filterOptions });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/suggest-category", requireAuth, async (req, res) => {
+  try {
+    const filterOptions = req.body?.filterOptions || await getAiFilterOptions();
+    const fallback = buildFallbackJob(req.body || {}, filterOptions);
+    fallback.summary = "Uyğun kateqoriya və filterlər təklif edildi.";
+    const system = "Sən iş elanına uyğun kateqoriya, vakansiya növü və vəzifə dərəcəsi seçən AI-sən. Yalnız JSON qaytar: {job:{category,jobType,jobLevel,title,description},summary}. Mütləq verilən option value-lardan istifadə et.";
+    const user = JSON.stringify({ input: req.body || {}, filterOptions });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/profile-bio", requireAuth, async (req, res) => {
+  try {
+    const profile = req.body?.profile || {};
+    const prompt = cleanAiText(req.body?.prompt || "");
+    const fallback = { bio: `${profile.fullName || profile.full_name || "Namizəd"} məsuliyyətli, öyrənməyə açıq və komanda ilə işləməyi bacaran namizəddir.`, summary: "Profil üçün qısa təqdimat hazırlandı." };
+    const system = "Sən iş axtaran profil mətni hazırlayan AI-sən. Azərbaycan dilində qısa, səmimi, professional bio yaz. Yalnız JSON qaytar: {bio,summary}.";
+    const user = JSON.stringify({ prompt, profile });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/support-reply", requireAuth, async (req, res) => {
+  try {
+    const message = cleanAiText(req.body?.message || req.body?.prompt || "");
+    const fallback = { reply: "Zəhmət olmasa bütün məcburi xanaları doldurduğunuzu, internet bağlantısını və səhifəni yeniləyib yenidən yoxlayın. Problem davam edərsə, müraciətiniz adminə yönləndiriləcək.", summary: "Dəstək üçün ilkin cavab hazırlandı." };
+    const system = "Sən Asimos dəstək köməkçisisən. Qısa, nəzakətli, addım-addım cavab ver. Lazımdırsa adminə yönləndirməyi de. Yalnız JSON qaytar: {reply,summary}.";
+    const user = JSON.stringify({ message, category: req.body?.category || "" });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/check-job-risk", requireAuth, async (req, res) => {
+  try {
+    const text = `${req.body?.title || ""}\n${req.body?.description || ""}\n${req.body?.wage || ""}`.toLowerCase();
+    const risky = ["gündə 500", "tez pul", "investisiya", "şəbəkə", "depozit", "ödəniş et", "qazanc zəmanəti"].some((word) => text.includes(word));
+    const fallback = { riskLevel: risky ? "yüksək" : "aşağı", reason: risky ? "Mətndə şübhəli qazanc və ya ödəniş ifadələri ola bilər." : "Açıq risk siqnalı görünmür.", suggestions: risky ? ["Elanı admin yoxlamasına göndərin", "Qazanc və ödəniş şərtlərini dəqiqləşdirin"] : ["Təsviri daha dəqiq yazmaq olar"] };
+    const system = "Sən iş elanı təhlükəsizlik yoxlayıcısısan. Spam, real olmayan qazanc, depozit, şübhəli iş təkliflərini analiz et. Yalnız JSON qaytar: {riskLevel,reason,suggestions:[string]}. riskLevel: aşağı, orta, yüksək.";
+    const user = JSON.stringify({ input: req.body || {} });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ai/match-jobs", optionalAuth, async (req, res) => {
+  try {
+    const query = cleanAiText(req.body?.query || req.body?.prompt || "").toLowerCase();
+    const city = cleanAiText(req.body?.city || "").toLowerCase();
+    const { data: jobs, error } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .in("status", ["open", "active"])
+      .order("created_at", { ascending: false })
+      .limit(80);
+    if (error) throw new Error(error.message);
+    const words = query.split(/\s+/).filter((w) => w.length > 2);
+    const scored = (jobs || []).map((job) => {
+      const haystack = `${job.title || ""} ${job.description || ""} ${job.category || ""} ${job.wage || ""} ${job.location?.address || ""}`.toLowerCase();
+      let score = 20;
+      for (const w of words) if (haystack.includes(w)) score += 12;
+      if (city && haystack.includes(city)) score += 20;
+      if (query.includes("yarım") && [job.job_type, job.jobType].includes("part_time")) score += 15;
+      if (query.includes("təcrübəsiz") && [job.job_level, job.jobLevel].includes("entry")) score += 15;
+      return { job, score: Math.min(score, 98) };
+    }).sort((a, b) => b.score - a.score).slice(0, 10);
+    return res.json({
+      summary: "Sizə uyğun elanlar tapıldı.",
+      items: scored.map(({ job, score }) => ({ id: job.id, title: job.title, companyName: job.company_name || job.companyName, location: job.location?.address || "", matchPercent: score, reason: "Axtarış mətninizə uyğunluq" }))
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/admin/ai/check-job", requireAdmin, async (req, res) => {
+  try {
+    const jobId = req.body?.jobId || req.body?.id;
+    let payload = req.body || {};
+    if (jobId) {
+      const { data } = await supabaseAdmin.from("jobs").select("*").eq("id", jobId).maybeSingle();
+      if (data) payload = data;
+    }
+    const text = `${payload.title || ""}\n${payload.description || ""}\n${payload.wage || ""}`.toLowerCase();
+    const risky = ["gündə 500", "tez pul", "investisiya", "depozit", "qazanc zəmanəti"].some((word) => text.includes(word));
+    const fallback = { riskLevel: risky ? "yüksək" : "aşağı", reason: risky ? "Şübhəli qazanc və ya ödəniş ifadələri var." : "Açıq risk siqnalı görünmür.", suggestions: risky ? ["Rədd səbəbi istəyin", "Əlaqə və şirkət məlumatlarını yoxlayın"] : ["Təsdiqdən əvvəl əlaqə məlumatlarını yoxlayın"] };
+    const system = "Sən admin üçün iş elanı risk analiz edən AI-sən. Yalnız JSON qaytar: {riskLevel,reason,suggestions:[string]}.";
+    const user = JSON.stringify({ job: payload });
+    return res.json(await callOpenAIJson({ system, user, fallback }));
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
