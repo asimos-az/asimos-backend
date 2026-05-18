@@ -4705,6 +4705,7 @@ const DEFAULT_SOCIAL_LINKS = {
   linkedin: "https://www.linkedin.com/",
   twitter: "https://x.com/",
   telegram: "https://t.me/",
+  whatsapp: "https://wa.me/994",
 };
 
 function normalizeSocialLinks(input = {}) {
