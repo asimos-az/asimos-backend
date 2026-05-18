@@ -5039,18 +5039,73 @@ async function callOpenAIJson({ system, user, fallback }) {
   return parsed || { ...fallback, aiProvider: "fallback", note: "AI cavabı JSON formatında gəlmədi." };
 }
 
+
+function extractJobFactsFromPrompt(promptText = {}) {
+  const text = cleanAiText(typeof promptText === "string" ? promptText : promptText?.prompt || promptText?.description || promptText?.title || "");
+  const lower = text.toLowerCase();
+  const facts = {};
+
+  const salaryRange = text.match(/(?:maaş|maas|salary)?\s*(\d{2,5})\s*(?:-|–|—|ilə|ile|arası|arasi)\s*(\d{2,5})\s*(?:azn|manat)?/i);
+  const salarySingle = text.match(/(?:maaş|maas|salary)\s*(?:[:=])?\s*(\d{2,5})\s*(?:azn|manat)?/i) || text.match(/(\d{2,5})\s*(?:azn|manat)/i);
+  if (salaryRange) facts.wage = `${salaryRange[1]}-${salaryRange[2]} AZN`;
+  else if (salarySingle) facts.wage = `${salarySingle[1]} AZN`;
+
+  const timeMatch = text.match(/(\b[01]?\d|2[0-3])[:.](\d{2})\b\s*(?:-|–|—|dən|dan|ile|ilə|to)?\s*(\b[01]?\d|2[0-3])[:.](\d{2})\b/i);
+  if (timeMatch) {
+    facts.startTime = `${String(timeMatch[1]).padStart(2, "0")}:${timeMatch[2]}`;
+    facts.endTime = `${String(timeMatch[3]).padStart(2, "0")}:${timeMatch[4]}`;
+  }
+
+  const cityMatch = text.match(/\b(bakı|baki|sumqayıt|sumqayit|gəncə|gence|mingəçevir|sheki|şəki|lənkəran|lenkeran|şirvan|sirvan|naxçıvan|naxcivan|quba|xaçmaz|xacmaz|masallı|masalli|salyan)\b/i);
+  if (cityMatch) {
+    const cityMap = { baki: "Bakı", bakı: "Bakı", sumqayit: "Sumqayıt", sumqayıt: "Sumqayıt", gence: "Gəncə", gəncə: "Gəncə", sheki: "Şəki", şəki: "Şəki", lenkeran: "Lənkəran", lənkəran: "Lənkəran", sirvan: "Şirvan", şirvan: "Şirvan", naxcivan: "Naxçıvan", naxçıvan: "Naxçıvan", quba: "Quba", xacmaz: "Xaçmaz", xaçmaz: "Xaçmaz", masalli: "Masallı", masallı: "Masallı", salyan: "Salyan" };
+    facts.city = cityMap[cityMatch[1].toLowerCase()] || cityMatch[1];
+  }
+
+  const addressMatch = text.match(/(?:iş yeri|is yeri|ünvan|unvan|lokasiya|məkan|mekan)\s*(?:[:=])?\s*([^,.\n]+)/i);
+  if (addressMatch) {
+    const address = addressMatch[1].trim();
+    facts.location = facts.city && !address.toLowerCase().includes(facts.city.toLowerCase()) ? `${address}, ${facts.city}` : address;
+  }
+
+  if (/ofisiant|ofisant|waiter/.test(lower)) facts.title = "Ofisiant";
+  else if (/satıcı|satici|satış|satis/.test(lower)) facts.title = "Satış məsləhətçisi";
+  else if (/kuryer|courier/.test(lower)) facts.title = "Kuryer";
+  else if (/operator/.test(lower)) facts.title = "Operator";
+
+  if (/yarım|yarim|part/.test(lower)) facts.jobType = "part_time";
+  else if (/növb|novb|shift|iş saati|is saati|saatı|saati/.test(lower)) facts.jobType = "shift";
+  else if (/frilans|freelance/.test(lower)) facts.jobType = "freelance";
+  else if (/müvəqqəti|muveqqeti|temporary/.test(lower)) facts.jobType = "temporary";
+
+  if (/təcrübə vacib deyil|tecrube vacib deyil|təcrübəsiz|tecrubesiz|təcrübə tələb olunmur|tecrube teleb olunmur/.test(lower)) {
+    facts.jobLevel = "entry";
+  }
+
+  return facts;
+}
+
+function mergeAiJobWithExactFacts(aiResponse = {}, payload = {}) {
+  const facts = extractJobFactsFromPrompt(payload);
+  const job = { ...(aiResponse.job || {}), ...facts };
+  if (facts.location && !job.city) job.city = facts.location;
+  if (!job.description && payload.prompt) job.description = cleanAiText(payload.prompt, 1000);
+  return { ...aiResponse, job };
+}
+
 function buildFallbackJob(payload = {}, filterOptions = {}) {
   const prompt = cleanAiText(payload.prompt || payload.description || payload.title || "Elan");
   const lower = prompt.toLowerCase();
   const vacancyTypes = filterOptions.vacancyTypes || DEFAULT_JOB_FILTER_OPTIONS.vacancyTypes || [];
   const levels = filterOptions.jobLevels || DEFAULT_JOB_FILTER_OPTIONS.jobLevels || [];
-  const category = payload.category || (lower.includes("sat") ? "Satış və Müştəri Xidmətləri" : lower.includes("kuryer") ? "Çatdırılma" : "Ümumi");
-  const jobType = payload.jobType || (lower.includes("yarım") ? "part_time" : lower.includes("frilans") ? "freelance" : firstOptionValue(vacancyTypes, "full_time"));
-  const jobLevel = payload.jobLevel || (lower.includes("təcrübə") || lower.includes("tecrube") ? "entry" : firstOptionValue(levels, "entry"));
-  const title = payload.title || (lower.includes("kuryer") ? "Kuryer" : lower.includes("operator") ? "Operator" : lower.includes("sat") ? "Satış təmsilçisi" : "Yeni vakansiya");
+  const facts = extractJobFactsFromPrompt(payload);
+  const category = payload.category || facts.category || (lower.includes("sat") ? "Satış və Müştəri Xidmətləri" : lower.includes("ofisiant") || lower.includes("ofisant") ? "Restoran və xidmət" : lower.includes("kuryer") ? "Çatdırılma" : "Ümumi");
+  const jobType = facts.jobType || payload.jobType || (lower.includes("yarım") ? "part_time" : lower.includes("frilans") ? "freelance" : firstOptionValue(vacancyTypes, "full_time"));
+  const jobLevel = facts.jobLevel || payload.jobLevel || (lower.includes("təcrübə") || lower.includes("tecrube") ? "entry" : firstOptionValue(levels, "entry"));
+  const title = facts.title || payload.title || (lower.includes("kuryer") ? "Kuryer" : lower.includes("operator") ? "Operator" : lower.includes("ofisiant") || lower.includes("ofisant") ? "Ofisiant" : lower.includes("sat") ? "Satış təmsilçisi" : "Yeni vakansiya");
   const companyName = payload.companyName || payload.company_name || "Şirkət";
-  const wage = payload.wage || payload.salary || "Razılaşma yolu ilə";
-  const city = payload.city || payload.location || "Bakı";
+  const wage = facts.wage || payload.wage || payload.salary || "Razılaşma yolu ilə";
+  const city = facts.location || facts.city || payload.city || payload.location || "Bakı";
   return {
     job: {
       title,
@@ -5062,6 +5117,8 @@ function buildFallbackJob(payload = {}, filterOptions = {}) {
       jobLevel,
       description: `${title} vəzifəsi üzrə namizəd axtarılır. Namizəd məsuliyyətli, punktual və komanda ilə işləməyi bacaran olmalıdır. İş yeri: ${city}. Maaş: ${wage}.`,
       requirements: ["Məsuliyyətli olmaq", "Ünsiyyət bacarığı", "Punktual olmaq"],
+      startTime: facts.startTime || payload.startTime || payload.start_time || "",
+      endTime: facts.endTime || payload.endTime || payload.end_time || "",
     },
     summary: "Elan mətni qayda əsaslı formalaşdırıldı.",
   };
@@ -5075,9 +5132,10 @@ app.post("/ai/generate-job", requireAuth, async (req, res) => {
   try {
     const filterOptions = req.body?.filterOptions || await getAiFilterOptions();
     const fallback = buildFallbackJob(req.body || {}, filterOptions);
-    const system = "Sən Asimos.az üçün Azərbaycan dilində peşəkar iş elanı hazırlayan AI köməkçisən. Yalnız JSON qaytar. JSON formatı: {job:{title,companyName,wage,city,category,jobType,jobLevel,description,requirements:[string]},summary}. jobType və jobLevel dəyərlərini verilən filter option value-larından seç. Mətnlər qısa, real və şişirdilməmiş olsun.";
+    const system = "Sən Asimos.az üçün Azərbaycan dilində peşəkar iş elanı hazırlayan AI köməkçisən. Yalnız JSON qaytar. JSON formatı: {job:{title,companyName,wage,city,category,jobType,jobLevel,description,requirements:[string]},summary}. jobType və jobLevel dəyərlərini verilən filter option value-larından seç. Mətnlər qısa, real və şişirdilməmiş olsun. İstifadəçinin yazdığı konkret maaş, saat, ünvan və vəzifə adını dəyişmə; maaş varsa heç vaxt razılaşma yolu yazma.";
     const user = JSON.stringify({ input: req.body || {}, filterOptions });
-    return res.json(await callOpenAIJson({ system, user, fallback }));
+    const aiResponse = await callOpenAIJson({ system, user, fallback });
+    return res.json(mergeAiJobWithExactFacts(aiResponse, req.body || {}));
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
