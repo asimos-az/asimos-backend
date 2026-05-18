@@ -1389,6 +1389,20 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
     }
 
 
+    if (effectiveStatus === "open") {
+      const jobForPublicNotify = {
+        id: updatedJob.id,
+        title: updatedJob.title,
+        category: updatedJob.category,
+        description: updatedJob.description,
+        wage: updatedJob.wage,
+        notifyRadiusM: updatedJob.notify_radius_m,
+        location: { lat: updatedJob.location_lat, lng: updatedJob.location_lng, address: updatedJob.location_address },
+      };
+      processJobAlerts(jobForPublicNotify).catch(console.error);
+      notifyNearbySeekers(jobForPublicNotify).catch(console.error);
+    }
+
     await logEvent("admin_job_updated", null, { job_id: id, patch: allowed });
     return res.json({ ok: true, job: updatedJob });
   } catch (e) {
@@ -2942,9 +2956,8 @@ app.get("/jobs", optionalAuth, async (req, res) => {
       query = query.eq("created_by", req.authUser.id);
 
     } else {
-      // MOD: Show both open and pending for visibility
-      // query = query.eq("status", "open");
-      query = query.in("status", ["open", "pending"]);
+      // Public listing must show only admin-approved jobs.
+      query = query.eq("status", "open");
       
       // New: Scheduled Publishing Filter
       const nowIso = new Date().toISOString();
@@ -3261,7 +3274,13 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
 
     const isAdmin = req.authUser?.is_admin;
     const isCreator = req.authUser?.id === data.created_by;
-    const isClosed = String(job.status || "open").toLowerCase() === "closed";
+    const publicStatus = String(job.status || "open").toLowerCase();
+    const isClosed = publicStatus === "closed";
+    const isPubliclyVisible = publicStatus === "open";
+
+    if (!isAdmin && !isCreator && !isPubliclyVisible) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     if (!isAdmin && !isCreator && (!profile || profile?.role === "seeker") && isClosed) {
       return res.status(404).json({ error: "Not found" });
@@ -3436,14 +3455,11 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .in("status", ["open", "closed"]);
 
     const requestedStatus = String(status || "").toLowerCase();
-    let initialStatus = saveAsDraft || requestedStatus === "draft" ? "draft" : "open";
-    if (requestedStatus === "pending") initialStatus = "pending";
-    if (requestedStatus === "scheduled") initialStatus = "scheduled";
+    // Employer-created jobs must wait for admin approval before appearing publicly.
+    // Drafts stay private; every publish request becomes pending.
+    let initialStatus = (saveAsDraft || requestedStatus === "draft") ? "draft" : "pending";
 
     const selectedPublishAt = published_at || publishedAt || publish_at || publishAt;
-    if (initialStatus === "open" && selectedPublishAt && new Date(selectedPublishAt) > new Date()) {
-      initialStatus = "scheduled";
-    }
 
     const payload = {
       created_by: req.authUser.id,
@@ -3561,7 +3577,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       link: job.link
     });
 
-    if (job.status === "pending" || job.status === "open") {
+    if (job.status === "pending") {
        notifyAdmins(
          "Yeni Elan (Təsdiq gözləyir)",
          `${req.authUser.fullName || "İşəgötürən"} yeni elan yerləşdirdi: "${job.title}"`,
@@ -3569,8 +3585,11 @@ app.post("/jobs", requireAuth, async (req, res) => {
        ).catch(console.error);
     }
 
-    processJobAlerts(job).catch(console.error);
-    notifyNearbySeekers(job).catch(console.error);
+    // Do not notify job seekers until admin approves the job.
+    if (job.status === "open") {
+      processJobAlerts(job).catch(console.error);
+      notifyNearbySeekers(job).catch(console.error);
+    }
 
 
 
@@ -3652,7 +3671,22 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
         : undefined,
     };
 
-    if (existing.status === "rejected") {
+    // Any employer edit of a non-draft job must go back to admin approval.
+    // This prevents edited content from being published without moderation.
+    const existingStatus = String(existing.status || "open").toLowerCase();
+    if (existingStatus !== "draft" && existingStatus !== "deleted") {
+      allowed.status = "pending";
+      allowed.rejection_reason = null;
+      allowed.closed_at = null;
+      allowed.closed_reason = null;
+      notifyAdmins(
+        "Elan redaktə edildi (Təsdiq gözləyir)",
+        `${profile.full_name || profile.fullName || "İşəgötürən"} elanı redaktə etdi: "${nextTitle || existing.title}"`,
+        { type: "job_edit_pending", id }
+      ).catch(console.error);
+    }
+
+    if (existingStatus === "rejected") {
       allowed.status = "pending";
       allowed.rejection_reason = null;
     }
@@ -3725,13 +3759,18 @@ app.patch("/jobs/:id/publish", requireAuth, async (req, res) => {
     const expiresAt = computeExpiresAt(existing.job_type || (existing.is_daily ? "temporary" : "permanent"), existing.duration_days || 1);
     const { data, error } = await supabaseAdmin
       .from("jobs")
-      .update({ status: "open", closed_at: null, closed_reason: null, rejection_reason: null, published_at: new Date().toISOString(), expires_at: expiresAt })
+      .update({ status: "pending", closed_at: null, closed_reason: null, rejection_reason: null, published_at: new Date().toISOString(), expires_at: expiresAt })
       .eq("id", id)
       .select("*")
       .single();
     if (error) return res.status(400).json({ error: error.message });
-    await logEvent("job_publish", req.authUser.id, { job_id: id });
-    return res.json({ ok: true, job: data });
+    await logEvent("job_publish_request", req.authUser.id, { job_id: id });
+    notifyAdmins(
+      "Elan aktivləşdirmə sorğusu",
+      `${profile.full_name || profile.fullName || "İşəgötürən"} elanı aktivləşdirmək istəyir: "${existing.title}"`,
+      { type: "job_publish_pending", id }
+    ).catch(console.error);
+    return res.json({ ok: true, job: data, pendingApproval: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
