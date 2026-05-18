@@ -1,5 +1,7 @@
 import "dotenv/config";
 import express from "express";
+import { createServer } from "http";
+import { Server as SocketIOServer } from "socket.io";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
@@ -82,6 +84,64 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
 }
 
 const app = express();
+const server = createServer(app);
+const io = new SocketIOServer(server, {
+  cors: { origin: "*", methods: ["GET", "POST", "PATCH", "DELETE"] },
+});
+
+function emitSupportUpdate(ticketId, userId, payload = {}) {
+  const data = { ticketId, userId, ...payload, at: new Date().toISOString() };
+  if (ticketId) io.to(`support:${ticketId}`).emit("support:updated", data);
+  if (userId) io.to(`user:${userId}`).emit("support:updated", data);
+  io.to("admins").emit("support:updated", data);
+}
+
+io.on("connection", async (socket) => {
+  try {
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    const adminToken = socket.handshake.auth?.adminToken || socket.handshake.query?.adminToken;
+
+    if (adminToken && verifyAdminToken(adminToken)) {
+      socket.join("admins");
+      socket.data.isAdmin = true;
+      return;
+    }
+
+    if (token) {
+      const adminPayload = verifyAdminToken(token);
+      if (adminPayload) {
+        socket.join("admins");
+        socket.data.isAdmin = true;
+        return;
+      }
+      const { data } = await supabaseAdmin.auth.getUser(token);
+      if (data?.user?.id) {
+        socket.data.userId = data.user.id;
+        socket.join(`user:${data.user.id}`);
+      }
+    }
+  } catch (e) {
+    console.error("[socket] auth error", e?.message || e);
+  }
+
+  socket.on("support:join", async ({ ticketId } = {}) => {
+    if (!ticketId) return;
+    if (socket.data.isAdmin) {
+      socket.join(`support:${ticketId}`);
+      return;
+    }
+    if (!socket.data.userId) return;
+    try {
+      const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id").eq("id", ticketId).maybeSingle();
+      if (ticket?.user_id === socket.data.userId) socket.join(`support:${ticketId}`);
+    } catch {}
+  });
+
+  socket.on("support:leave", ({ ticketId } = {}) => {
+    if (ticketId) socket.leave(`support:${ticketId}`);
+  });
+});
+
 app.use(cors());
 app.use(express.json());
 
@@ -4042,12 +4102,14 @@ app.post("/support", requireAnyAuth, async (req, res) => {
     if (tErr) return res.status(400).json({ error: tErr.message });
 
     // 2. Insert initial message to history
-    await supabaseAdmin.from("support_messages").insert({
+    const { data: firstMessage } = await supabaseAdmin.from("support_messages").insert({
       ticket_id: ticket.id,
       sender_id: req.authUser.id,
       is_admin: false,
       message: message,
-    });
+    }).select().single();
+
+    emitSupportUpdate(ticket.id, req.authUser.id, { type: "created", message: firstMessage || null });
 
     // Notify Telegram
     await logEvent("support_ticket", req.authUser.id, {
@@ -4107,14 +4169,15 @@ app.post("/support/:id/reply", requireAnyAuth, async (req, res) => {
       return res.status(404).json({ error: "Bilet tapılmadı" });
     }
 
-    const { error } = await supabaseAdmin.from("support_messages").insert({
+    const { data: insertedMessage, error } = await supabaseAdmin.from("support_messages").insert({
       ticket_id: id,
       sender_id: req.authUser.id,
       is_admin: false,
       message,
-    });
+    }).select().single();
 
     if (error) return res.status(400).json({ error: error.message });
+    emitSupportUpdate(id, req.authUser.id, { type: "user_reply", message: insertedMessage || null });
 
     // Update status to open if it was closed or replied
     await supabaseAdmin.from("support_tickets").update({ status: "open", is_answered: false }).eq("id", id);
@@ -4155,6 +4218,7 @@ app.delete("/support/:id", requireAnyAuth, async (req, res) => {
     // Delete ticket (cascade should delete messages, or doing it manually)
     await supabaseAdmin.from("support_messages").delete().eq("ticket_id", id);
     await supabaseAdmin.from("support_tickets").delete().eq("id", id);
+    emitSupportUpdate(id, req.authUser.id, { type: "deleted" });
 
     return res.json({ ok: true });
   } catch (e) {
@@ -4211,12 +4275,12 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
     if (!message) return res.status(400).json({ error: "Mesaj yazılmayıb" });
 
     // 1. Add message
-    const { error } = await supabaseAdmin.from("support_messages").insert({
+    const { data: insertedMessage, error } = await supabaseAdmin.from("support_messages").insert({
       ticket_id: id,
       sender_id: null, // Admin
       is_admin: true,
       message,
-    });
+    }).select().single();
     if (error) return res.status(400).json({ error: error.message });
 
     // 2. Update ticket
@@ -4228,6 +4292,7 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
     // 3. Notify User
     const { data: ticket } = await supabaseAdmin.from("support_tickets").select("user_id, subject").eq("id", id).single();
     if (ticket?.user_id) {
+      emitSupportUpdate(id, ticket.user_id, { type: "admin_reply", message: insertedMessage || null });
       console.log(`[Support Notify] Preparing for user: ${ticket.user_id}`);
       const { data: userTokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", ticket.user_id);
       console.log(`[Support Notify] Found tokens: ${userTokens?.length || 0}`);
@@ -4285,8 +4350,10 @@ app.post("/admin/support/:id/reply", requireAdmin, async (req, res) => {
 app.delete("/admin/support/:id", requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    const { data: oldTicket } = await supabaseAdmin.from("support_tickets").select("user_id").eq("id", id).maybeSingle();
     const { error } = await supabaseAdmin.from("support_tickets").delete().eq("id", id);
     if (error) return res.status(400).json({ error: error.message });
+    emitSupportUpdate(id, oldTicket?.user_id || null, { type: "deleted" });
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -4294,7 +4361,8 @@ app.delete("/admin/support/:id", requireAdmin, async (req, res) => {
 });
 
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
+  console.log(`Asimos backend running on ${PORT}`);
 });
 
 
