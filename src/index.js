@@ -3048,6 +3048,10 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
         jobLevel: r.job_level || r.position_level || r.level || null,
         job_level: r.job_level || r.position_level || r.level || null,
+        startTime: r.start_time || null,
+        start_time: r.start_time || null,
+        endTime: r.end_time || null,
+        end_time: r.end_time || null,
         durationDays: (r.duration_days ?? null),
         expiresAt: (r.expires_at ?? null),
         publishedAt: (r.published_at ?? null),
@@ -3217,6 +3221,12 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       logo_url: data.image_url || null,
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
+      jobLevel: data.job_level || data.position_level || data.level || null,
+      job_level: data.job_level || data.position_level || data.level || null,
+      startTime: data.start_time || null,
+      start_time: data.start_time || null,
+      endTime: data.end_time || null,
+      end_time: data.end_time || null,
       durationDays: (data.duration_days ?? null),
       expiresAt: (data.expires_at ?? null),
       publishedAt: (data.published_at ?? null),
@@ -3367,6 +3377,14 @@ app.post("/jobs", requireAuth, async (req, res) => {
       publishedAt,
       publish_at,
       publishAt,
+      start_time,
+      startTime,
+      schedule_start,
+      work_start_time,
+      end_time,
+      endTime,
+      schedule_end,
+      work_end_time,
       image_url,
       imageUrl,
       logo_url,
@@ -3449,6 +3467,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       location_address: locAddr,
       company_name: (company_name || companyName) ? String(company_name || companyName).trim() : null,
       published_at: selectedPublishAt ? new Date(selectedPublishAt).toISOString() : null,
+      start_time: (start_time || startTime || schedule_start || work_start_time) ? String(start_time || startTime || schedule_start || work_start_time).trim() : null,
+      end_time: (end_time || endTime || schedule_end || work_end_time) ? String(end_time || endTime || schedule_end || work_end_time).trim() : null,
       image_url: (image_url || imageUrl || logo_url || logoUrl) ? String(image_url || imageUrl || logo_url || logoUrl).trim() : null,
     };
 
@@ -3463,7 +3483,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     if (error) {
       const msg = String(error.message || "");
-      if (/column .*\b(job_type|duration_days|expires_at|status|published_at|job_level|image_url)\b/i.test(msg)) {
+      if (/column .*\b(job_type|duration_days|expires_at|status|published_at|job_level|image_url|start_time|end_time)\b/i.test(msg)) {
         const fallback = { ...payload };
         fallback.job_type = undefined;
         fallback.duration_days = undefined;
@@ -3472,6 +3492,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
         fallback.published_at = undefined;
         fallback.job_level = undefined;
         fallback.image_url = undefined;
+        fallback.start_time = undefined;
+        fallback.end_time = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -3503,6 +3525,12 @@ app.post("/jobs", requireAuth, async (req, res) => {
       logo_url: data.image_url || null,
       isDaily: data.is_daily,
       jobType: data.job_type || (data.is_daily ? "temporary" : "permanent"),
+      jobLevel: data.job_level || data.position_level || data.level || null,
+      job_level: data.job_level || data.position_level || data.level || null,
+      startTime: data.start_time || null,
+      start_time: data.start_time || null,
+      endTime: data.end_time || null,
+      end_time: data.end_time || null,
       durationDays: (data.duration_days ?? null),
       expiresAt: (data.expires_at ?? null),
       publishedAt: (data.published_at ?? null),
@@ -3606,6 +3634,15 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       job_level: (body.jobLevel !== undefined || body.job_level !== undefined || body.positionLevel !== undefined || body.level !== undefined)
         ? (body.jobLevel || body.job_level || body.positionLevel || body.level ? String(body.jobLevel || body.job_level || body.positionLevel || body.level).trim() : null)
         : undefined,
+      job_type: (body.jobType !== undefined || body.job_type !== undefined || body.workType !== undefined || body.work_type !== undefined)
+        ? normalizeJobType(body.jobType || body.job_type || body.workType || body.work_type, !!body.isDaily)
+        : undefined,
+      start_time: (body.start_time !== undefined || body.startTime !== undefined || body.schedule_start !== undefined || body.work_start_time !== undefined)
+        ? (body.start_time || body.startTime || body.schedule_start || body.work_start_time ? String(body.start_time || body.startTime || body.schedule_start || body.work_start_time).trim() : null)
+        : undefined,
+      end_time: (body.end_time !== undefined || body.endTime !== undefined || body.schedule_end !== undefined || body.work_end_time !== undefined)
+        ? (body.end_time || body.endTime || body.schedule_end || body.work_end_time ? String(body.end_time || body.endTime || body.schedule_end || body.work_end_time).trim() : null)
+        : undefined,
       notify_radius_m: body.notifyRadiusM !== undefined ? toNum(body.notifyRadiusM) : undefined,
       location_lat: locLat,
       location_lng: locLng,
@@ -3650,6 +3687,10 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),
       jobLevel: updated.job_level || updated.position_level || updated.level || null,
       job_level: updated.job_level || updated.position_level || updated.level || null,
+      startTime: updated.start_time || null,
+      start_time: updated.start_time || null,
+      endTime: updated.end_time || null,
+      end_time: updated.end_time || null,
       durationDays: (updated.duration_days ?? null),
       expiresAt: (updated.expires_at ?? null),
       publishedAt: (updated.published_at ?? null),
