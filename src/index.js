@@ -1010,6 +1010,34 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
   }
 });
 
+
+app.get("/admin/employers", requireAdmin, async (req, res) => {
+  try {
+    let all = [];
+    let from = 0;
+    const step = 1000;
+
+    while (true) {
+      const { data, error } = await supabaseAdmin
+        .from("profiles")
+        .select("id, full_name, email, phone, company_name, role, created_at")
+        .eq("role", "employer")
+        .order("created_at", { ascending: false })
+        .range(from, from + step - 1);
+
+      if (error) return res.status(400).json({ error: error.message });
+      const rows = data || [];
+      all = all.concat(rows);
+      if (rows.length < step) break;
+      from += step;
+    }
+
+    return res.json({ items: all });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.get("/admin/users", requireAdmin, async (req, res) => {
   try {
     const q = (req.query.q || "").toString().trim();
