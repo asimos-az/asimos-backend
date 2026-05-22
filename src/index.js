@@ -1011,28 +1011,80 @@ app.get("/admin/dashboard", requireAdmin, async (req, res) => {
 });
 
 
+const EMPLOYER_ROLE_VALUES = new Set([
+  "employer",
+  "isci_axtaran",
+  "işçi_axtaran",
+  "isci-axtaran",
+  "işçi-axtaran",
+  "worker_employer",
+  "company",
+  "business",
+]);
+
+function isEmployerLikeProfile(profile) {
+  const role = String(profile?.role || "").trim().toLowerCase();
+  if (EMPLOYER_ROLE_VALUES.has(role)) return true;
+  if (role.includes("employer") || role.includes("isci") || role.includes("işçi")) return true;
+  if (profile?.company_name || profile?.companyName || profile?.voen || profile?.category) return true;
+  return false;
+}
+
 app.get("/admin/employers", requireAdmin, async (req, res) => {
   try {
-    let all = [];
+    let profiles = [];
     let from = 0;
     const step = 1000;
 
     while (true) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, email, phone, company_name, role, created_at")
-        .eq("role", "employer")
+        .select("id, full_name, email, phone, company_name, role, category, voen, created_at")
         .order("created_at", { ascending: false })
         .range(from, from + step - 1);
 
       if (error) return res.status(400).json({ error: error.message });
       const rows = data || [];
-      all = all.concat(rows);
+      profiles = profiles.concat(rows);
       if (rows.length < step) break;
       from += step;
     }
 
-    return res.json({ items: all });
+    const employerMap = new Map();
+    for (const profile of profiles) {
+      if (isEmployerLikeProfile(profile)) employerMap.set(profile.id, profile);
+    }
+
+    // Backfill: some old rows can have jobs but their profile role was not saved as employer.
+    // Those users should still be selectable by admin when creating/editing a job.
+    let jobOwners = [];
+    from = 0;
+    while (true) {
+      const { data, error } = await supabaseAdmin
+        .from("jobs")
+        .select("created_by")
+        .not("created_by", "is", null)
+        .range(from, from + step - 1);
+
+      if (error) break;
+      const rows = data || [];
+      jobOwners = jobOwners.concat(rows.map((r) => r.created_by).filter(Boolean));
+      if (rows.length < step) break;
+      from += step;
+    }
+
+    const ownerSet = new Set(jobOwners);
+    for (const profile of profiles) {
+      if (ownerSet.has(profile.id)) employerMap.set(profile.id, profile);
+    }
+
+    const items = Array.from(employerMap.values()).sort((a, b) => {
+      const ad = new Date(a.created_at || 0).getTime();
+      const bd = new Date(b.created_at || 0).getTime();
+      return bd - ad;
+    });
+
+    return res.json({ items, total: items.length });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
@@ -1220,7 +1272,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       .eq("id", created_by)
       .single();
     if (empErr || !emp) return res.status(400).json({ error: "Employer user not found" });
-    if (String(emp.role || "").toLowerCase() !== "employer") {
+    if (!isEmployerLikeProfile(emp)) {
       return res.status(400).json({ error: "created_by must be an employer" });
     }
 
