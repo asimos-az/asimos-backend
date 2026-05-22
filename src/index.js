@@ -1022,12 +1022,40 @@ const EMPLOYER_ROLE_VALUES = new Set([
   "business",
 ]);
 
+function normalizeRoleValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("ı", "i")
+    .replaceAll("ə", "e")
+    .replaceAll("ç", "c")
+    .replaceAll("ş", "s")
+    .replaceAll("ğ", "g")
+    .replaceAll("ü", "u")
+    .replaceAll("ö", "o")
+    .replaceAll(" ", "_");
+}
+
 function isEmployerLikeProfile(profile) {
-  const role = String(profile?.role || "").trim().toLowerCase();
-  if (EMPLOYER_ROLE_VALUES.has(role)) return true;
-  if (role.includes("employer") || role.includes("isci") || role.includes("işçi")) return true;
+  const rawRole = String(profile?.role || "").trim().toLowerCase();
+  const role = normalizeRoleValue(rawRole);
+  if (EMPLOYER_ROLE_VALUES.has(rawRole) || EMPLOYER_ROLE_VALUES.has(role)) return true;
+  if (role.includes("employer") || role.includes("isci_axtaran") || role.includes("isci-axtaran")) return true;
   if (profile?.company_name || profile?.companyName || profile?.voen || profile?.category) return true;
   return false;
+}
+
+async function listAllAuthUsersForAdmin() {
+  const map = new Map();
+  const perPage = 1000;
+  for (let page = 1; page <= 50; page += 1) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (error) break;
+    const users = data?.users || [];
+    for (const user of users) map.set(user.id, user);
+    if (users.length < perPage) break;
+  }
+  return map;
 }
 
 app.get("/admin/employers", requireAdmin, async (req, res) => {
@@ -1037,10 +1065,12 @@ app.get("/admin/employers", requireAdmin, async (req, res) => {
     const step = 1000;
 
     while (true) {
+      // IMPORTANT: select("*") is intentional. Some Supabase projects do not
+      // have profiles.email, profiles.company_name or profiles.voen columns.
+      // Selecting explicit missing columns makes the whole employer select empty.
       const { data, error } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, email, phone, company_name, role, category, voen, created_at")
-        .order("created_at", { ascending: false })
+        .select("*")
         .range(from, from + step - 1);
 
       if (error) return res.status(400).json({ error: error.message });
@@ -1050,13 +1080,30 @@ app.get("/admin/employers", requireAdmin, async (req, res) => {
       from += step;
     }
 
+    const authUsers = await listAllAuthUsersForAdmin();
     const employerMap = new Map();
+
     for (const profile of profiles) {
-      if (isEmployerLikeProfile(profile)) employerMap.set(profile.id, profile);
+      if (isEmployerLikeProfile(profile)) {
+        const authUser = authUsers.get(profile.id);
+        employerMap.set(profile.id, {
+          ...profile,
+          email: profile.email || authUser?.email || null,
+          phone: profile.phone || authUser?.phone || authUser?.user_metadata?.phone || null,
+          full_name:
+            profile.full_name ||
+            profile.fullName ||
+            authUser?.user_metadata?.full_name ||
+            authUser?.user_metadata?.name ||
+            profile.company_name ||
+            profile.companyName ||
+            "Employer",
+          company_name: profile.company_name || profile.companyName || authUser?.user_metadata?.company_name || null,
+        });
+      }
     }
 
-    // Backfill: some old rows can have jobs but their profile role was not saved as employer.
-    // Those users should still be selectable by admin when creating/editing a job.
+    // Backfill: if a user has already created a job, show them too even if role was saved incorrectly.
     let jobOwners = [];
     from = 0;
     while (true) {
@@ -1073,9 +1120,29 @@ app.get("/admin/employers", requireAdmin, async (req, res) => {
       from += step;
     }
 
-    const ownerSet = new Set(jobOwners);
-    for (const profile of profiles) {
-      if (ownerSet.has(profile.id)) employerMap.set(profile.id, profile);
+    const profilesById = new Map(profiles.map((p) => [p.id, p]));
+    for (const id of new Set(jobOwners)) {
+      const profile = profilesById.get(id);
+      const authUser = authUsers.get(id);
+      if (profile || authUser) {
+        employerMap.set(id, {
+          ...(profile || {}),
+          id,
+          email: profile?.email || authUser?.email || null,
+          phone: profile?.phone || authUser?.phone || authUser?.user_metadata?.phone || null,
+          full_name:
+            profile?.full_name ||
+            profile?.fullName ||
+            authUser?.user_metadata?.full_name ||
+            authUser?.user_metadata?.name ||
+            profile?.company_name ||
+            profile?.companyName ||
+            "Employer",
+          company_name: profile?.company_name || profile?.companyName || authUser?.user_metadata?.company_name || null,
+          role: profile?.role || "employer",
+          created_at: profile?.created_at || authUser?.created_at || null,
+        });
+      }
     }
 
     const items = Array.from(employerMap.values()).sort((a, b) => {
@@ -1089,6 +1156,7 @@ app.get("/admin/employers", requireAdmin, async (req, res) => {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
+
 
 app.get("/admin/users", requireAdmin, async (req, res) => {
   try {
