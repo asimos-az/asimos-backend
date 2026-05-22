@@ -305,6 +305,155 @@ async function sendTelegram(text) {
   }
 }
 
+
+function normalizePhoneForWhatsApp(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  let digits = raw.replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("994")) return `+${digits}`;
+  if (digits.length === 9) return `+994${digits}`;
+  if (digits.length === 10 && digits.startsWith("0")) return `+994${digits.slice(1)}`;
+  if (raw.startsWith("+")) return `+${digits}`;
+  return `+${digits}`;
+}
+
+function isValidAzerbaijanPhone(input) {
+  const phone = normalizePhoneForWhatsApp(input);
+  return /^\+994\d{9}$/.test(phone);
+}
+
+function whatsappEnabled() {
+  return String(process.env.WHATSAPP_ENABLED || "").toLowerCase() === "true" &&
+    !!process.env.WHATSAPP_PHONE_NUMBER_ID &&
+    !!process.env.WHATSAPP_ACCESS_TOKEN &&
+    !!process.env.WHATSAPP_TEMPLATE_NAME;
+}
+
+function buildPublicJobUrl(jobId) {
+  const base = String(process.env.PUBLIC_WEB_URL || process.env.WEB_URL || "https://asimos.az").replace(/\/$/, "");
+  return `${base}/jobs/${encodeURIComponent(String(jobId || ""))}`;
+}
+
+async function sendWhatsAppTemplate({ phone, params = [] }) {
+  if (!whatsappEnabled()) {
+    return { ok: false, skipped: true, reason: "whatsapp_not_configured" };
+  }
+
+  const to = normalizePhoneForWhatsApp(phone).replace(/^\+/, "");
+  if (!to) return { ok: false, skipped: true, reason: "invalid_phone" };
+
+  const url = `https://graph.facebook.com/v19.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const body = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: process.env.WHATSAPP_TEMPLATE_NAME,
+      language: { code: process.env.WHATSAPP_TEMPLATE_LANG || "az" },
+      components: [{
+        type: "body",
+        parameters: params.map((value) => ({ type: "text", text: String(value ?? "-").slice(0, 900) }))
+      }]
+    }
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return { ok: false, status: response.status, error: data?.error?.message || JSON.stringify(data).slice(0, 500) };
+  }
+  return { ok: true, providerMessageId: data?.messages?.[0]?.id || null };
+}
+
+async function createWhatsAppLog(row) {
+  try {
+    const { error } = await supabaseAdmin.from("whatsapp_job_alert_logs").insert(row);
+    if (error && !/does not exist|schema cache/i.test(error.message || "")) {
+      console.warn("WhatsApp log insert error:", error.message);
+    }
+  } catch (e) {
+    console.warn("WhatsApp log insert failed:", e.message);
+  }
+}
+
+async function notifySeekersByWhatsAppAboutJob(job) {
+  try {
+    if (!job?.id) return { ok: false, reason: "missing_job" };
+
+    const { data: seekers, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, full_name, phone, whatsapp_opt_in, role, whatsapp_last_job_alert_at")
+      .eq("role", "seeker")
+      .eq("whatsapp_opt_in", true)
+      .not("phone", "is", null)
+      .limit(2000);
+
+    if (error) {
+      const msg = String(error.message || "");
+      if (/whatsapp_opt_in|whatsapp_last_job_alert_at|schema cache|does not exist/i.test(msg)) {
+        console.warn("WhatsApp columns/table missing. Run migration first.");
+        return { ok: false, reason: "migration_missing" };
+      }
+      throw error;
+    }
+
+    const items = seekers || [];
+    if (!items.length) return { ok: true, matched: 0, sent: 0 };
+
+    const title = job.title || "Yeni iş elanı";
+    const company = job.company_name || job.companyName || "Asimos";
+    const wage = job.wage || "Qeyd olunmayıb";
+    const location = job.location_address || job.location?.address || "Qeyd olunmayıb";
+    const link = buildPublicJobUrl(job.id);
+
+    let sent = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const seeker of items) {
+      const phone = normalizePhoneForWhatsApp(seeker.phone);
+      if (!/^\+\d{8,15}$/.test(phone)) {
+        skipped += 1;
+        await createWhatsAppLog({ job_id: job.id, user_id: seeker.id, phone: seeker.phone || "", status: "skipped", error: "invalid_phone" });
+        continue;
+      }
+
+      const result = await sendWhatsAppTemplate({
+        phone,
+        params: [seeker.full_name || "", title, company, wage, location, link]
+      });
+
+      if (result.ok) {
+        sent += 1;
+        await createWhatsAppLog({ job_id: job.id, user_id: seeker.id, phone, status: "sent", provider_message_id: result.providerMessageId, sent_at: new Date().toISOString() });
+        await supabaseAdmin.from("profiles").update({ whatsapp_last_job_alert_at: new Date().toISOString() }).eq("id", seeker.id).catch?.(() => {});
+      } else if (result.skipped) {
+        skipped += 1;
+        await createWhatsAppLog({ job_id: job.id, user_id: seeker.id, phone, status: "skipped", error: result.reason || "skipped" });
+      } else {
+        failed += 1;
+        await createWhatsAppLog({ job_id: job.id, user_id: seeker.id, phone, status: "failed", error: result.error || "send_failed" });
+      }
+    }
+
+    await logEvent("whatsapp_job_alerts_sent", null, { job_id: job.id, title, matched: items.length, sent, skipped, failed });
+    return { ok: true, matched: items.length, sent, skipped, failed };
+  } catch (e) {
+    console.warn("notifySeekersByWhatsAppAboutJob error:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 async function logEvent(type, actorId, metadata) {
   try {
     await supabaseAdmin.from("events").insert({
@@ -797,6 +946,7 @@ function profileToUser(profile, authUser) {
     companyName: profile?.company_name || null,
     email: authUser?.email || null,
     phone: profile?.phone || null,
+    whatsappOptIn: profile?.whatsapp_opt_in ?? false,
     location: profile?.location || null,
     notifSoundEnabled: profile?.notif_sound_enabled ?? true,
     notifSoundName: profile?.notif_sound_name || "default",
@@ -1420,6 +1570,9 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
         },
       };
       await notifyNearbySeekers(jobForNotify);
+      if (String(data.status || "").toLowerCase() === "open") {
+        notifySeekersByWhatsAppAboutJob({ ...data, location: { lat: data.location_lat, lng: data.location_lng, address: data.location_address } }).catch(console.error);
+      }
     } catch { }
 
     await logEvent("admin_job_created", null, { job_id: data.id, created_by });
@@ -1560,6 +1713,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       };
       processJobAlerts(jobForPublicNotify).catch(console.error);
       notifyNearbySeekers(jobForPublicNotify).catch(console.error);
+      notifySeekersByWhatsAppAboutJob({ ...updatedJob, location: jobForPublicNotify.location }).catch(console.error);
     }
 
     await logEvent("admin_job_updated", null, { job_id: id, patch: allowed });
@@ -1802,6 +1956,8 @@ app.post("/auth/register", async (req, res) => {
       phone,
       location,
       category,
+      whatsappOptIn,
+      whatsapp_opt_in,
     } = req.body || {};
 
     if (!email || !password || !fullName || !role) {
@@ -1810,6 +1966,11 @@ app.post("/auth/register", async (req, res) => {
     if (!["seeker", "employer"].includes(role)) {
       return res.status(400).json({ error: "Invalid role" });
     }
+    if (!isValidAzerbaijanPhone(phone)) {
+      return res.status(400).json({ error: "Telefon nömrəsi məcburidir və +994 formatında olmalıdır" });
+    }
+    const normalizedPhone = normalizePhoneForWhatsApp(phone);
+    const wantsWhatsAppAlerts = role === "seeker" && Boolean(whatsappOptIn ?? whatsapp_opt_in);
 
     const cleanEmail = String(email).trim().toLowerCase();
 
@@ -1827,8 +1988,9 @@ app.post("/auth/register", async (req, res) => {
           role,
           fullName,
           companyName: role === "employer" ? (companyName || null) : null,
-          phone: phone || null,
+          phone: normalizedPhone,
           location: location || null,
+          whatsappOptIn: wantsWhatsAppAlerts,
         },
       },
     });
@@ -1865,10 +2027,11 @@ app.post("/auth/register", async (req, res) => {
             role,
             fullName,
             companyName: role === "employer" ? (companyName || null) : null,
-            phone: phone || null,
+            phone: normalizedPhone,
             location: location || null,
             category: role === "employer" ? (category || null) : null,
-          },
+            whatsappOptIn: wantsWhatsAppAlerts,
+        },
         });
       } catch { }
 
@@ -1880,9 +2043,11 @@ app.post("/auth/register", async (req, res) => {
             role,
             full_name: fullName,
             company_name: role === "employer" ? (companyName || null) : null,
-            phone: phone || null,
+            phone: normalizedPhone,
             location: location || null,
             category: role === "employer" ? (category || null) : null,
+            whatsapp_opt_in: wantsWhatsAppAlerts,
+            whatsapp_opt_in_at: wantsWhatsAppAlerts ? new Date().toISOString() : null,
           });
         }
       } catch { }
@@ -1975,7 +2140,7 @@ app.post("/auth/login", async (req, res) => {
 
 app.post("/auth/verify-otp", async (req, res) => {
   try {
-    const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, location: locationFromReq } = req.body || {};
+    const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, location: locationFromReq, whatsappOptIn, whatsapp_opt_in } = req.body || {};
     if (!email || !code) return res.status(400).json({ error: "Missing fields" });
     if (!password) return res.status(400).json({ error: "Password required" });
 
@@ -2008,8 +2173,12 @@ app.post("/auth/verify-otp", async (req, res) => {
 
     const finalFullName = String(fullNameFromReq ?? md.fullName ?? "");
     const finalCompanyName = finalRole === "employer" ? (companyNameFromReq ?? md.companyName ?? null) : null;
-    const finalPhone = phoneFromReq ?? md.phone ?? null;
+    const finalPhone = normalizePhoneForWhatsApp(phoneFromReq ?? md.phone ?? null);
     const finalLocation = locationFromReq ?? md.location ?? null;
+    const wantsWhatsAppAlerts = finalRole === "seeker" && Boolean(whatsappOptIn ?? whatsapp_opt_in ?? md.whatsappOptIn ?? md.whatsapp_opt_in);
+    if (!isValidAzerbaijanPhone(finalPhone)) {
+      return res.status(400).json({ error: "Telefon nömrəsi məcburidir və +994 formatında olmalıdır" });
+    }
 
     try {
       await supabaseAdmin.auth.admin.updateUserById(userId, {
@@ -2020,6 +2189,7 @@ app.post("/auth/verify-otp", async (req, res) => {
           companyName: finalCompanyName,
           phone: finalPhone,
           location: finalLocation,
+          whatsappOptIn: wantsWhatsAppAlerts,
         },
       });
     } catch { }
@@ -2047,6 +2217,8 @@ app.post("/auth/verify-otp", async (req, res) => {
       company_name: finalCompanyName,
       phone: finalPhone,
       location: finalLocation,
+      whatsapp_opt_in: wantsWhatsAppAlerts,
+      whatsapp_opt_in_at: wantsWhatsAppAlerts ? new Date().toISOString() : null,
       status: finalRole === "employer" ? "pending" : "active",
     });
 
