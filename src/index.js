@@ -243,7 +243,9 @@ app.get("/admin/debug-whatsapp", requireAdmin, (req, res) => {
     WHATSAPP_TEMPLATE_NAME,
     WHATSAPP_TEMPLATE_LANGUAGE,
     WHATSAPP_NOTIFY_NUMBERS_COUNT: WHATSAPP_NOTIFY_NUMBERS.length,
-    WHATSAPP_SEND_TO_JOB_CONTACT
+    WHATSAPP_SEND_TO_JOB_CONTACT,
+    WHATSAPP_SEND_TO_ALL_SEEKERS,
+    WHATSAPP_ALL_SEEKERS_LIMIT
   });
 });
 
@@ -360,6 +362,8 @@ const WHATSAPP_NOTIFY_NUMBERS = String(process.env.WHATSAPP_NOTIFY_NUMBERS || ""
   .map((x) => normalizeWhatsAppPhone(x))
   .filter(Boolean);
 const WHATSAPP_SEND_TO_JOB_CONTACT = String(process.env.WHATSAPP_SEND_TO_JOB_CONTACT || "false").toLowerCase() === "true";
+const WHATSAPP_SEND_TO_ALL_SEEKERS = String(process.env.WHATSAPP_SEND_TO_ALL_SEEKERS || "false").toLowerCase() === "true";
+const WHATSAPP_ALL_SEEKERS_LIMIT = Math.max(1, Number(process.env.WHATSAPP_ALL_SEEKERS_LIMIT || 1000));
 
 function normalizeWhatsAppPhone(value) {
   let phone = String(value || "").replace(/[^0-9]/g, "");
@@ -420,19 +424,40 @@ async function sendWhatsAppTemplateMessage(to, firstParamText = "istifadəçi") 
   return { ok: true, data };
 }
 
+async function getAllSeekerWhatsAppNumbers() {
+  if (!WHATSAPP_SEND_TO_ALL_SEEKERS) return [];
+
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id, phone")
+    .eq("role", "seeker")
+    .not("phone", "is", null)
+    .limit(WHATSAPP_ALL_SEEKERS_LIMIT);
+
+  if (error) {
+    console.error("[WhatsApp] seekers fetch error:", error.message);
+    return [];
+  }
+
+  return uniqueWhatsAppRecipients((data || []).map((item) => item.phone));
+}
+
 async function notifyWhatsAppAboutJob(job, profile = {}, extraRecipients = []) {
+  const seekerRecipients = await getAllSeekerWhatsAppNumbers();
+
   const recipients = uniqueWhatsAppRecipients([
     ...WHATSAPP_NOTIFY_NUMBERS,
+    ...seekerRecipients,
     ...(WHATSAPP_SEND_TO_JOB_CONTACT ? [job?.whatsapp, job?.phone, job?.contact_phone] : []),
     ...extraRecipients
   ]);
 
   if (!recipients.length) {
-    console.warn("[WhatsApp] no recipients. Set WHATSAPP_NOTIFY_NUMBERS or WHATSAPP_SEND_TO_JOB_CONTACT=true");
+    console.warn("[WhatsApp] no recipients. Set WHATSAPP_NOTIFY_NUMBERS, WHATSAPP_SEND_TO_ALL_SEEKERS=true, or WHATSAPP_SEND_TO_JOB_CONTACT=true");
     return { ok: false, sent: 0, skipped: true, reason: "no_recipients" };
   }
 
-  const firstParamText = profile?.full_name || profile?.fullName || profile?.company_name || profile?.companyName || job?.companyName || job?.company_name || "istifadəçi";
+  const firstParamText = profile?.full_name || profile?.fullName || profile?.company_name || profile?.companyName || job?.companyName || job?.company_name || job?.title || "istifadəçi";
   const results = [];
   for (const to of recipients) {
     try {
@@ -442,7 +467,7 @@ async function notifyWhatsAppAboutJob(job, profile = {}, extraRecipients = []) {
       results.push({ ok: false, error: e?.message || String(e) });
     }
   }
-  return { ok: results.some((r) => r.ok), sent: results.filter((r) => r.ok).length, results };
+  return { ok: results.some((r) => r.ok), sent: results.filter((r) => r.ok).length, totalRecipients: recipients.length, results };
 }
 
 async function logEvent(type, actorId, metadata) {
