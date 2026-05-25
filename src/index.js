@@ -251,9 +251,15 @@ app.get("/admin/debug-whatsapp", requireAdmin, (req, res) => {
 
 app.post("/admin/test-whatsapp", requireAdmin, async (req, res) => {
   try {
-    const phone = req.body?.phone || req.body?.to;
-    const name = req.body?.name || "istifadəçi";
-    const result = await sendWhatsAppTemplateMessage(phone, name);
+    const body = req.body || {};
+    const phone = body.phone || body.to || WHATSAPP_NOTIFY_NUMBERS[0];
+    const testJob = {
+      title: body.title || body.job_title || "Frontend Developer",
+      category: body.category || body.job_category || "IT / Proqramlaşdırma",
+      wage: body.salary || body.wage || body.job_salary || "1500 - 2500 AZN",
+      location: body.location || body.address || body.job_location || "Bakı"
+    };
+    const result = await sendWhatsAppTemplateMessage(phone, testJob);
     return res.status(result.ok ? 200 : 400).json(result);
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message || "Server error" });
@@ -378,7 +384,46 @@ function uniqueWhatsAppRecipients(numbers = []) {
   return [...new Set((numbers || []).map((x) => normalizeWhatsAppPhone(x)).filter(Boolean))];
 }
 
-async function sendWhatsAppTemplateMessage(to, firstParamText = "istifadəçi") {
+function cleanWhatsAppParam(value, fallback = "Qeyd olunmayıb", maxLength = 250) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return (text || fallback).slice(0, maxLength);
+}
+
+function getWhatsAppJobSalary(job = {}) {
+  return job.salary || job.wage || job.salary_text || job.salaryText || job.pay || job.payment || "Maaş qeyd olunmayıb";
+}
+
+function getWhatsAppJobLocation(job = {}) {
+  if (typeof job.location === "string") return job.location;
+  return job.location_address || job.address || job.city || job.region || job.location?.address || "Ünvan qeyd olunmayıb";
+}
+
+function buildWhatsAppJobTemplateParameters(job = {}) {
+  return [
+    {
+      type: "text",
+      parameter_name: "job_title",
+      text: cleanWhatsAppParam(job.title || job.name, "Yeni iş elanı")
+    },
+    {
+      type: "text",
+      parameter_name: "job_category",
+      text: cleanWhatsAppParam(job.category || job.category_name || job.categoryName, "Kateqoriya qeyd olunmayıb")
+    },
+    {
+      type: "text",
+      parameter_name: "job_salary",
+      text: cleanWhatsAppParam(getWhatsAppJobSalary(job), "Maaş qeyd olunmayıb")
+    },
+    {
+      type: "text",
+      parameter_name: "job_location",
+      text: cleanWhatsAppParam(getWhatsAppJobLocation(job), "Ünvan qeyd olunmayıb")
+    }
+  ];
+}
+
+async function sendWhatsAppTemplateMessage(to, job = {}) {
   const recipient = normalizeWhatsAppPhone(to);
   if (!recipient) return { ok: false, skipped: true, reason: "missing_recipient" };
   if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
@@ -386,6 +431,7 @@ async function sendWhatsAppTemplateMessage(to, firstParamText = "istifadəçi") 
     return { ok: false, skipped: true, reason: "missing_config" };
   }
 
+  const templateJob = typeof job === "string" ? { title: job } : (job || {});
   const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
   const payload = {
     messaging_product: "whatsapp",
@@ -397,9 +443,7 @@ async function sendWhatsAppTemplateMessage(to, firstParamText = "istifadəçi") 
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: String(firstParamText || "istifadəçi").slice(0, 100) }
-          ]
+          parameters: buildWhatsAppJobTemplateParameters(templateJob)
         }
       ]
     }
@@ -457,11 +501,15 @@ async function notifyWhatsAppAboutJob(job, profile = {}, extraRecipients = []) {
     return { ok: false, sent: 0, skipped: true, reason: "no_recipients" };
   }
 
-  const firstParamText = profile?.full_name || profile?.fullName || profile?.company_name || profile?.companyName || job?.companyName || job?.company_name || job?.title || "istifadəçi";
+  const templateJob = {
+    ...job,
+    company_name: job?.company_name || job?.companyName || profile?.company_name || profile?.companyName || null,
+    companyName: job?.companyName || job?.company_name || profile?.companyName || profile?.company_name || null
+  };
   const results = [];
   for (const to of recipients) {
     try {
-      results.push(await sendWhatsAppTemplateMessage(to, firstParamText));
+      results.push(await sendWhatsAppTemplateMessage(to, templateJob));
     } catch (e) {
       console.error("[WhatsApp] unexpected error:", e?.message || e);
       results.push({ ok: false, error: e?.message || String(e) });
