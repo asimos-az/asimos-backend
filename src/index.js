@@ -235,6 +235,29 @@ app.get("/admin/debug-smtp", (req, res) => {
   });
 });
 
+app.get("/admin/debug-whatsapp", requireAdmin, (req, res) => {
+  res.json({
+    WHATSAPP_ACCESS_TOKEN: WHATSAPP_ACCESS_TOKEN ? "Configured" : "MISSING",
+    WHATSAPP_PHONE_NUMBER_ID: WHATSAPP_PHONE_NUMBER_ID ? "Configured (" + WHATSAPP_PHONE_NUMBER_ID + ")" : "MISSING",
+    WHATSAPP_API_VERSION,
+    WHATSAPP_TEMPLATE_NAME,
+    WHATSAPP_TEMPLATE_LANGUAGE,
+    WHATSAPP_NOTIFY_NUMBERS_COUNT: WHATSAPP_NOTIFY_NUMBERS.length,
+    WHATSAPP_SEND_TO_JOB_CONTACT
+  });
+});
+
+app.post("/admin/test-whatsapp", requireAdmin, async (req, res) => {
+  try {
+    const phone = req.body?.phone || req.body?.to;
+    const name = req.body?.name || "istifadəçi";
+    const result = await sendWhatsAppTemplateMessage(phone, name);
+    return res.status(result.ok ? 200 : 400).json(result);
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message || "Server error" });
+  }
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -323,6 +346,103 @@ async function sendTelegram(text) {
   } catch (e) {
     console.error("Telegram error:", e.message);
   }
+}
+
+
+// --- WHATSAPP CLOUD API CONFIG ---
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN || "";
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
+const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || "v25.0";
+const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || "new_job_alert";
+const WHATSAPP_TEMPLATE_LANGUAGE = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "az";
+const WHATSAPP_NOTIFY_NUMBERS = String(process.env.WHATSAPP_NOTIFY_NUMBERS || "")
+  .split(",")
+  .map((x) => normalizeWhatsAppPhone(x))
+  .filter(Boolean);
+const WHATSAPP_SEND_TO_JOB_CONTACT = String(process.env.WHATSAPP_SEND_TO_JOB_CONTACT || "false").toLowerCase() === "true";
+
+function normalizeWhatsAppPhone(value) {
+  let phone = String(value || "").replace(/[^0-9]/g, "");
+  if (!phone) return "";
+  if (phone.startsWith("00")) phone = phone.slice(2);
+  if (phone.length === 10 && phone.startsWith("0")) phone = `994${phone.slice(1)}`;
+  if (phone.length === 9 && !phone.startsWith("994")) phone = `994${phone}`;
+  return phone;
+}
+
+function uniqueWhatsAppRecipients(numbers = []) {
+  return [...new Set((numbers || []).map((x) => normalizeWhatsAppPhone(x)).filter(Boolean))];
+}
+
+async function sendWhatsAppTemplateMessage(to, firstParamText = "istifadəçi") {
+  const recipient = normalizeWhatsAppPhone(to);
+  if (!recipient) return { ok: false, skipped: true, reason: "missing_recipient" };
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    console.warn("[WhatsApp] WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID is missing");
+    return { ok: false, skipped: true, reason: "missing_config" };
+  }
+
+  const url = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+  const payload = {
+    messaging_product: "whatsapp",
+    to: recipient,
+    type: "template",
+    template: {
+      name: WHATSAPP_TEMPLATE_NAME,
+      language: { code: WHATSAPP_TEMPLATE_LANGUAGE },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: String(firstParamText || "istifadəçi").slice(0, 100) }
+          ]
+        }
+      ]
+    }
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    console.error("[WhatsApp] send error:", data || response.statusText);
+    return { ok: false, status: response.status, data };
+  }
+
+  console.log("[WhatsApp] sent:", { to: recipient, data });
+  return { ok: true, data };
+}
+
+async function notifyWhatsAppAboutJob(job, profile = {}, extraRecipients = []) {
+  const recipients = uniqueWhatsAppRecipients([
+    ...WHATSAPP_NOTIFY_NUMBERS,
+    ...(WHATSAPP_SEND_TO_JOB_CONTACT ? [job?.whatsapp, job?.phone, job?.contact_phone] : []),
+    ...extraRecipients
+  ]);
+
+  if (!recipients.length) {
+    console.warn("[WhatsApp] no recipients. Set WHATSAPP_NOTIFY_NUMBERS or WHATSAPP_SEND_TO_JOB_CONTACT=true");
+    return { ok: false, sent: 0, skipped: true, reason: "no_recipients" };
+  }
+
+  const firstParamText = profile?.full_name || profile?.fullName || profile?.company_name || profile?.companyName || job?.companyName || job?.company_name || "istifadəçi";
+  const results = [];
+  for (const to of recipients) {
+    try {
+      results.push(await sendWhatsAppTemplateMessage(to, firstParamText));
+    } catch (e) {
+      console.error("[WhatsApp] unexpected error:", e?.message || e);
+      results.push({ ok: false, error: e?.message || String(e) });
+    }
+  }
+  return { ok: results.some((r) => r.ok), sent: results.filter((r) => r.ok).length, results };
 }
 
 async function logEvent(type, actorId, metadata) {
@@ -1452,6 +1572,12 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     } catch { }
 
     await logEvent("admin_job_created", null, { job_id: data.id, created_by });
+    notifyWhatsAppAboutJob({
+      ...data,
+      phone: data.contact_phone,
+      companyName: data.company_name,
+      company_name: data.company_name
+    }, emp).catch(console.error);
     return res.json({ ok: true, job: data });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -1578,6 +1704,18 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
 
 
     if (effectiveStatus === "open") {
+      try {
+        const creatorProfile = updatedJob.created_by ? await getProfile(updatedJob.created_by) : null;
+        notifyWhatsAppAboutJob({
+          ...updatedJob,
+          phone: updatedJob.contact_phone,
+          companyName: updatedJob.company_name,
+          company_name: updatedJob.company_name,
+          location: { lat: updatedJob.location_lat, lng: updatedJob.location_lng, address: updatedJob.location_address }
+        }, creatorProfile || {}).catch(console.error);
+      } catch (e) {
+        console.error("[WhatsApp] approval notify error:", e?.message || e);
+      }
       const jobForPublicNotify = {
         id: updatedJob.id,
         title: updatedJob.title,
@@ -3810,6 +3948,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       whatsapp: job.whatsapp,
       link: job.link
     });
+
+    notifyWhatsAppAboutJob(job, profile).catch(console.error);
 
     if (job.status === "pending") {
       await insertNotifications([{
