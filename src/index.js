@@ -2142,6 +2142,7 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       wage: patch.wage,
       whatsapp: patch.whatsapp,
       contact_phone: patch.contact_phone ?? patch.phone ?? patch.contactPhone,
+      contact_email: patch.contact_email ?? patch.contactEmail ?? patch.email,
       contact_link: patch.contact_link ?? patch.link ?? patch.contactLink ?? patch.ats_link ?? patch.atsLink,
       ats_link: patch.ats_link ?? patch.atsLink ?? patch.contact_link ?? patch.link ?? patch.contactLink,
       workplace: patch.workplace ?? patch.workplace_name ?? patch.branch,
@@ -3961,6 +3962,9 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         views: Number(r.views || 0),
         whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
         phone: req.authUser ? (r.contact_phone ?? null) : null,
+        email: req.authUser ? (r.contact_email ?? null) : null,
+        contactEmail: req.authUser ? (r.contact_email ?? null) : null,
+        contact_email: req.authUser ? (r.contact_email ?? null) : null,
         link: req.authUser ? (r.contact_link ?? r.ats_link ?? null) : null,
         atsLink: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
         ats_link: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
@@ -4074,6 +4078,9 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         whatsapp: null,
         phone: null,
         link: null,
+        email: null,
+        contactEmail: null,
+        contact_email: null,
       }));
     }
 
@@ -4150,6 +4157,9 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       views: Number(data.views || 0),
       whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
       phone: req.authUser ? (data.contact_phone ?? null) : null,
+      email: req.authUser ? (data.contact_email ?? null) : null,
+      contactEmail: req.authUser ? (data.contact_email ?? null) : null,
+      contact_email: req.authUser ? (data.contact_email ?? null) : null,
       link: req.authUser ? (data.contact_link ?? data.ats_link ?? null) : null,
       atsLink: req.authUser ? (data.ats_link ?? data.contact_link ?? null) : null,
       ats_link: req.authUser ? (data.ats_link ?? data.contact_link ?? null) : null,
@@ -4242,6 +4252,110 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
   }
 });
 
+
+app.get("/jobs/:id/similar", optionalAuth, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ error: "id required" });
+
+    const limit = Math.min(Math.max(toNum(req.query.limit) || 6, 1), 12);
+    const { data: base, error: baseError } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (baseError) return res.status(400).json({ error: baseError.message });
+    if (!base) return res.status(404).json({ error: "Not found" });
+
+    const nowIso = new Date().toISOString();
+    let query = supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .neq("id", id)
+      .eq("status", "open")
+      .or(`published_at.is.null,published_at.lte.${nowIso}`)
+      .order("created_at", { ascending: false })
+      .limit(limit * 3);
+
+    if (base.category) query = query.eq("category", base.category);
+
+    let { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    if (!data || data.length === 0) {
+      const fallback = await supabaseAdmin
+        .from("jobs")
+        .select("*")
+        .neq("id", id)
+        .eq("status", "open")
+        .or(`published_at.is.null,published_at.lte.${nowIso}`)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      data = fallback.data || [];
+      error = fallback.error;
+      if (error) return res.status(400).json({ error: error.message });
+    }
+
+    const items = (data || []).slice(0, limit).map((r) => ({
+      id: r.id,
+      title: r.title,
+      category: r.category,
+      description: r.description,
+      wage: r.wage,
+      views: Number(r.views || 0),
+      whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
+      phone: req.authUser ? (r.contact_phone ?? null) : null,
+      email: req.authUser ? (r.contact_email ?? null) : null,
+      contactEmail: req.authUser ? (r.contact_email ?? null) : null,
+      contact_email: req.authUser ? (r.contact_email ?? null) : null,
+      link: req.authUser ? (r.contact_link ?? r.ats_link ?? null) : null,
+      atsLink: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
+      ats_link: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
+      workplace: r.workplace ?? null,
+      workplace_name: r.workplace ?? null,
+      vacancyStartDate: r.vacancy_start_date ?? null,
+      vacancy_start_date: r.vacancy_start_date ?? null,
+      vacancyEndDate: r.vacancy_end_date ?? null,
+      vacancy_end_date: r.vacancy_end_date ?? null,
+      contactVisibility: r.contact_visibility ?? null,
+      contact_visibility: r.contact_visibility ?? null,
+      primaryContact: r.primary_contact ?? null,
+      primary_contact: r.primary_contact ?? null,
+      voen: r.voen ?? null,
+      company_name: r.company_name ?? null,
+      companyName: r.company_name ?? null,
+      imageUrl: r.image_url || r.company_logo_url || null,
+      image_url: r.image_url || r.company_logo_url || null,
+      logoUrl: r.company_logo_url || r.image_url || null,
+      logo_url: r.company_logo_url || r.image_url || null,
+      companyLogoUrl: r.company_logo_url || r.image_url || null,
+      company_logo_url: r.company_logo_url || r.image_url || null,
+      isDaily: r.is_daily,
+      jobType: r.job_type || (r.is_daily ? "temporary" : "permanent"),
+      jobLevel: r.job_level || r.position_level || r.level || null,
+      job_level: r.job_level || r.position_level || r.level || null,
+      startTime: r.start_time || null,
+      start_time: r.start_time || null,
+      endTime: r.end_time || null,
+      end_time: r.end_time || null,
+      durationDays: r.duration_days ?? null,
+      expiresAt: r.expires_at ?? null,
+      publishedAt: r.published_at ?? null,
+      published_at: r.published_at ?? null,
+      notifyRadiusM: r.notify_radius_m,
+      createdAt: r.created_at,
+      createdBy: r.created_by,
+      status: r.status || "open",
+      location: { lat: r.location_lat, lng: r.location_lng, address: r.location_address },
+    }));
+
+    return res.json({ items });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.post("/jobs/:id/view", async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -4319,6 +4433,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
       wage,
       whatsapp,
       phone,
+      email,
+      contactEmail,
+      contact_email,
       link,
       contactPhone,
       contactLink,
@@ -4425,6 +4542,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
       wage: wage || null,
       whatsapp: whatsapp || null,
       contact_phone: (contactPhone || phone) ? String(contactPhone || phone).trim() : null,
+      contact_email: (contactEmail || contact_email || email) ? String(contactEmail || contact_email || email).trim() : null,
       contact_link: (contactLink || atsLink || ats_link || link) ? String(contactLink || atsLink || ats_link || link).trim() : null,
       ats_link: (atsLink || ats_link || contactLink || link) ? String(atsLink || ats_link || contactLink || link).trim() : null,
       workplace: (workplace || workplace_name) ? String(workplace || workplace_name).trim() : null,
@@ -4478,6 +4596,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
         fallback.vacancy_end_date = undefined;
         fallback.contact_visibility = undefined;
         fallback.primary_contact = undefined;
+        fallback.contact_email = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -4499,7 +4618,22 @@ app.post("/jobs", requireAuth, async (req, res) => {
       description: data.description,
       wage: data.wage, whatsapp: data.whatsapp,
       phone: data.contact_phone ?? null,
+      email: data.contact_email ?? null,
+      contactEmail: data.contact_email ?? null,
+      contact_email: data.contact_email ?? null,
       link: data.contact_link ?? null,
+      atsLink: data.ats_link ?? data.contact_link ?? null,
+      ats_link: data.ats_link ?? data.contact_link ?? null,
+      workplace: data.workplace ?? null,
+      workplace_name: data.workplace ?? null,
+      vacancyStartDate: data.vacancy_start_date ?? null,
+      vacancy_start_date: data.vacancy_start_date ?? null,
+      vacancyEndDate: data.vacancy_end_date ?? null,
+      vacancy_end_date: data.vacancy_end_date ?? null,
+      contactVisibility: data.contact_visibility ?? null,
+      contact_visibility: data.contact_visibility ?? null,
+      primaryContact: data.primary_contact ?? null,
+      primary_contact: data.primary_contact ?? null,
       voen: data.voen ?? null,
       company_name: (data.company_name ?? null),
       companyName: (data.company_name ?? null),
@@ -4633,6 +4767,9 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       contact_phone: (body.contactPhone !== undefined || body.phone !== undefined)
         ? (body.contactPhone || body.phone ? String(body.contactPhone || body.phone).trim() : null)
         : undefined,
+      contact_email: (body.contactEmail !== undefined || body.contact_email !== undefined || body.email !== undefined)
+        ? (body.contactEmail || body.contact_email || body.email ? String(body.contactEmail || body.contact_email || body.email).trim() : null)
+        : undefined,
       contact_link: (body.contactLink !== undefined || body.link !== undefined || body.atsLink !== undefined || body.ats_link !== undefined)
         ? (body.contactLink || body.link || body.atsLink || body.ats_link ? String(body.contactLink || body.link || body.atsLink || body.ats_link).trim() : null)
         : undefined,
@@ -4731,7 +4868,22 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       wage: updated.wage,
       whatsapp: updated.whatsapp,
       phone: updated.contact_phone ?? null,
-      link: updated.contact_link ?? null,
+      email: updated.contact_email ?? null,
+      contactEmail: updated.contact_email ?? null,
+      contact_email: updated.contact_email ?? null,
+      link: updated.contact_link ?? updated.ats_link ?? null,
+      atsLink: updated.ats_link ?? updated.contact_link ?? null,
+      ats_link: updated.ats_link ?? updated.contact_link ?? null,
+      workplace: updated.workplace ?? null,
+      workplace_name: updated.workplace ?? null,
+      vacancyStartDate: updated.vacancy_start_date ?? null,
+      vacancy_start_date: updated.vacancy_start_date ?? null,
+      vacancyEndDate: updated.vacancy_end_date ?? null,
+      vacancy_end_date: updated.vacancy_end_date ?? null,
+      contactVisibility: updated.contact_visibility ?? null,
+      contact_visibility: updated.contact_visibility ?? null,
+      primaryContact: updated.primary_contact ?? null,
+      primary_contact: updated.primary_contact ?? null,
       voen: updated.voen ?? null,
       company_name: (updated.company_name ?? null),
       companyName: (updated.company_name ?? null),
@@ -4887,7 +5039,22 @@ app.patch("/jobs/:id/close", requireAuth, async (req, res) => {
       description: updated.description,
       wage: updated.wage, whatsapp: updated.whatsapp,
       phone: updated.contact_phone ?? null,
-      link: updated.contact_link ?? null,
+      email: updated.contact_email ?? null,
+      contactEmail: updated.contact_email ?? null,
+      contact_email: updated.contact_email ?? null,
+      link: updated.contact_link ?? updated.ats_link ?? null,
+      atsLink: updated.ats_link ?? updated.contact_link ?? null,
+      ats_link: updated.ats_link ?? updated.contact_link ?? null,
+      workplace: updated.workplace ?? null,
+      workplace_name: updated.workplace ?? null,
+      vacancyStartDate: updated.vacancy_start_date ?? null,
+      vacancy_start_date: updated.vacancy_start_date ?? null,
+      vacancyEndDate: updated.vacancy_end_date ?? null,
+      vacancy_end_date: updated.vacancy_end_date ?? null,
+      contactVisibility: updated.contact_visibility ?? null,
+      contact_visibility: updated.contact_visibility ?? null,
+      primaryContact: updated.primary_contact ?? null,
+      primary_contact: updated.primary_contact ?? null,
       voen: updated.voen ?? null,
       isDaily: updated.is_daily,
       jobType: updated.job_type || (updated.is_daily ? "temporary" : "permanent"),

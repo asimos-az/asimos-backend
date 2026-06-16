@@ -6,6 +6,9 @@ alter table public.jobs
   add column if not exists ats_link text;
 
 alter table public.jobs
+  add column if not exists contact_email text;
+
+alter table public.jobs
   add column if not exists vacancy_start_date date;
 
 alter table public.jobs
