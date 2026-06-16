@@ -1003,10 +1003,25 @@ async function activateScheduledJobs() {
 
 
 
+const PROMO_CARD_TYPES = {
+  sponsored: { position: "latest_jobs", sortOrder: 0, defaultBadge: "Sponsorlu", defaultLogo: "AS" },
+  recommended: { position: "after_4_jobs", sortOrder: 4, defaultBadge: "Tövsiyə olunur", defaultLogo: "🎓" },
+};
+
+function normalizePromoCardType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["recommended", "recommend", "suggested", "tovsiye", "tövsiyə"].includes(raw)) return "recommended";
+  return "sponsored";
+}
+
 function normalizeSponsoredCard(row) {
   if (!row) return null;
+  const cardType = normalizePromoCardType(row.card_type || row.cardType || (row.position === "after_4_jobs" ? "recommended" : "sponsored"));
+  const config = PROMO_CARD_TYPES[cardType] || PROMO_CARD_TYPES.sponsored;
   return {
     id: row.id,
+    cardType,
+    card_type: cardType,
     title: row.title || "",
     companyName: row.company_name || "",
     company_name: row.company_name || "",
@@ -1016,13 +1031,15 @@ function normalizeSponsoredCard(row) {
     cta_label: row.cta_label || "Ətraflı bax",
     ctaUrl: row.cta_url || "",
     cta_url: row.cta_url || "",
-    logoText: row.logo_text || "AS",
-    logo_text: row.logo_text || "AS",
-    badgeLabel: row.badge_label || "Sponsorlu",
-    badge_label: row.badge_label || "Sponsorlu",
+    logoText: row.logo_text || config.defaultLogo,
+    logo_text: row.logo_text || config.defaultLogo,
+    badgeLabel: row.badge_label || config.defaultBadge,
+    badge_label: row.badge_label || config.defaultBadge,
     isActive: row.is_active !== false,
     is_active: row.is_active !== false,
-    position: row.position || "latest_jobs",
+    position: row.position || config.position,
+    sortOrder: Number(row.sort_order ?? config.sortOrder),
+    sort_order: Number(row.sort_order ?? config.sortOrder),
     createdAt: row.created_at || null,
     created_at: row.created_at || null,
     updatedAt: row.updated_at || null,
@@ -1030,25 +1047,39 @@ function normalizeSponsoredCard(row) {
   };
 }
 
-function buildSponsoredCardPayload(body = {}) {
+function buildSponsoredCardPayload(body = {}, forcedCardType) {
   const title = String(body.title || "").trim();
   if (!title) return { error: "Başlıq boş ola bilməz" };
 
+  const cardType = normalizePromoCardType(forcedCardType || body.card_type || body.cardType);
+  const config = PROMO_CARD_TYPES[cardType] || PROMO_CARD_TYPES.sponsored;
   const isActive = body.is_active !== undefined ? Boolean(body.is_active) : body.isActive !== undefined ? Boolean(body.isActive) : true;
 
   return {
+    cardType,
     data: {
+      card_type: cardType,
       title,
       company_name: body.company_name || body.companyName ? String(body.company_name || body.companyName).trim() : null,
       subtitle: body.subtitle ? String(body.subtitle).trim() : null,
       description: body.description ? String(body.description).trim() : null,
       cta_label: body.cta_label || body.ctaLabel ? String(body.cta_label || body.ctaLabel).trim() : "Ətraflı bax",
       cta_url: body.cta_url || body.ctaUrl ? String(body.cta_url || body.ctaUrl).trim() : null,
-      logo_text: body.logo_text || body.logoText ? String(body.logo_text || body.logoText).trim().slice(0, 4).toUpperCase() : "AS",
-      badge_label: body.badge_label || body.badgeLabel ? String(body.badge_label || body.badgeLabel).trim() : "Sponsorlu",
+      logo_text: body.logo_text || body.logoText ? String(body.logo_text || body.logoText).trim().slice(0, 4).toUpperCase() : config.defaultLogo,
+      badge_label: body.badge_label || body.badgeLabel ? String(body.badge_label || body.badgeLabel).trim() : config.defaultBadge,
       is_active: isActive,
-      position: body.position ? String(body.position).trim() : "latest_jobs",
+      position: config.position,
+      sort_order: config.sortOrder,
     }
+  };
+}
+
+function promoCardsResponse(items = []) {
+  const normalized = items.map(normalizeSponsoredCard).filter(Boolean);
+  return {
+    items: normalized,
+    sponsored: normalized.find((item) => item.cardType === "sponsored") || null,
+    recommended: normalized.find((item) => item.cardType === "recommended") || null,
   };
 }
 
@@ -1559,19 +1590,43 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
 });
 
 
-app.get("/sponsored-card", async (req, res) => {
+app.get("/sponsored-cards", async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from("sponsored_cards")
       .select("*")
       .eq("is_active", true)
-      .eq("position", "latest_jobs")
+      .in("card_type", ["sponsored", "recommended"])
+      .order("sort_order", { ascending: true })
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      if (/does not exist|schema cache|sponsored_cards|card_type|sort_order/i.test(String(error.message || ""))) {
+        return res.json({ items: [], sponsored: null, recommended: null });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json(promoCardsResponse(data || []));
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/sponsored-card", async (req, res) => {
+  try {
+    const cardType = normalizePromoCardType(req.query.cardType || req.query.type);
+    const { data, error } = await supabaseAdmin
+      .from("sponsored_cards")
+      .select("*")
+      .eq("is_active", true)
+      .eq("card_type", cardType)
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
     if (error) {
-      if (/does not exist|schema cache|sponsored_cards/i.test(String(error.message || ""))) {
+      if (/does not exist|schema cache|sponsored_cards|card_type/i.test(String(error.message || ""))) {
         return res.json({ item: null });
       }
       return res.status(400).json({ error: error.message });
@@ -1583,18 +1638,41 @@ app.get("/sponsored-card", async (req, res) => {
   }
 });
 
-app.get("/admin/sponsored-card", requireAdmin, async (req, res) => {
+app.get("/admin/sponsored-cards", requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from("sponsored_cards")
       .select("*")
-      .eq("position", "latest_jobs")
+      .in("card_type", ["sponsored", "recommended"])
+      .order("sort_order", { ascending: true })
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      if (/does not exist|schema cache|sponsored_cards|card_type|sort_order/i.test(String(error.message || ""))) {
+        return res.json({ ...promoCardsResponse([]), migrationRequired: true });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json(promoCardsResponse(data || []));
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/sponsored-card", requireAdmin, async (req, res) => {
+  try {
+    const cardType = normalizePromoCardType(req.query.cardType || req.query.type);
+    const { data, error } = await supabaseAdmin
+      .from("sponsored_cards")
+      .select("*")
+      .eq("card_type", cardType)
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
     if (error) {
-      if (/does not exist|schema cache|sponsored_cards/i.test(String(error.message || ""))) {
+      if (/does not exist|schema cache|sponsored_cards|card_type/i.test(String(error.message || ""))) {
         return res.json({ item: null, migrationRequired: true });
       }
       return res.status(400).json({ error: error.message });
@@ -1608,19 +1686,20 @@ app.get("/admin/sponsored-card", requireAdmin, async (req, res) => {
 
 app.put("/admin/sponsored-card", requireAdmin, async (req, res) => {
   try {
-    const built = buildSponsoredCardPayload(req.body || {});
+    const cardType = normalizePromoCardType(req.query.cardType || req.query.type || req.body?.card_type || req.body?.cardType);
+    const built = buildSponsoredCardPayload(req.body || {}, cardType);
     if (built.error) return res.status(400).json({ error: built.error });
 
     const { data: existing, error: readError } = await supabaseAdmin
       .from("sponsored_cards")
       .select("id")
-      .eq("position", "latest_jobs")
+      .eq("card_type", built.cardType)
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (readError && /does not exist|schema cache|sponsored_cards/i.test(String(readError.message || ""))) {
-      return res.status(400).json({ error: "sponsored_cards table tapılmadı. Əvvəl sponsored_card_migration.sql faylını Supabase SQL Editor-da çalışdırın." });
+    if (readError && /does not exist|schema cache|sponsored_cards|card_type/i.test(String(readError.message || ""))) {
+      return res.status(400).json({ error: "sponsored_cards table tapılmadı və ya yenilənməyib. Əvvəl sponsored_card_migration.sql faylını Supabase SQL Editor-da çalışdırın." });
     }
     if (readError) return res.status(400).json({ error: readError.message });
 
@@ -1631,7 +1710,7 @@ app.put("/admin/sponsored-card", requireAdmin, async (req, res) => {
     const { data, error } = await query;
     if (error) return res.status(400).json({ error: error.message });
 
-    await logEvent("admin_sponsored_card_saved", null, { sponsored_card_id: data.id }).catch(() => null);
+    await logEvent("admin_promo_card_saved", null, { sponsored_card_id: data.id, card_type: built.cardType }).catch(() => null);
     return res.json({ ok: true, item: normalizeSponsoredCard(data) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -1640,13 +1719,14 @@ app.put("/admin/sponsored-card", requireAdmin, async (req, res) => {
 
 app.delete("/admin/sponsored-card", requireAdmin, async (req, res) => {
   try {
+    const cardType = normalizePromoCardType(req.query.cardType || req.query.type);
     const { error } = await supabaseAdmin
       .from("sponsored_cards")
       .update({ is_active: false })
-      .eq("position", "latest_jobs");
+      .eq("card_type", cardType);
 
     if (error) return res.status(400).json({ error: error.message });
-    await logEvent("admin_sponsored_card_disabled", null, {}).catch(() => null);
+    await logEvent("admin_promo_card_disabled", null, { card_type: cardType }).catch(() => null);
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
