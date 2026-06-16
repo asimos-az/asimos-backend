@@ -1083,6 +1083,112 @@ function promoCardsResponse(items = []) {
   };
 }
 
+const DEFAULT_HOME_WIDGETS = {
+  useful_info: {
+    widget_key: "useful_info",
+    title: "Faydalı məlumat",
+    button_label: "📚 Faydalı məlumat",
+    is_active: true,
+    items: [
+      { title: "Əmək Məcəlləsi (e-qanun.az)", url: "https://e-qanun.az/framework/46943", icon: "📥" },
+      { title: "DOST mərkəzləri — iş axtaranlar üçün", url: "https://dost.gov.az/", icon: "📥" },
+      { title: "Rəsmi VÖEN sorğusu", url: "https://www.e-taxes.gov.az/", icon: "📥" },
+      { title: "CV hazırlama bələdçisi", url: "https://asimos.az", icon: "📥" },
+      { title: "Müsahibəyə hazırlıq tövsiyələri", url: "https://asimos.az", icon: "📥" },
+    ],
+  },
+  idea: {
+    widget_key: "idea",
+    title: "Yeni ideyan var?",
+    button_label: "💡 Yeni ideyan var?",
+    description: "Asimos.az-ı necə daha yaxşı edə bilərik? İdeyanı yaz, mail vasitəsilə bizə göndər.",
+    email_to: "lduo4737@gmail.com",
+    email_subject: "Asimos.az üçün yeni ideya",
+    textarea_placeholder: "İdeyanı buraya yaz...",
+    cta_label: "✉️ Mail ilə göndər",
+    is_active: true,
+  },
+};
+
+function normalizeHomeWidget(row, key) {
+  const defaults = DEFAULT_HOME_WIDGETS[key] || { widget_key: key };
+  const rawItems = row?.items ?? defaults.items ?? [];
+  const items = Array.isArray(rawItems) ? rawItems : [];
+
+  return {
+    widget_key: key,
+    key,
+    title: row?.title || defaults.title || "",
+    button_label: row?.button_label || defaults.button_label || defaults.title || "",
+    description: row?.description || defaults.description || "",
+    email_to: row?.email_to || defaults.email_to || "",
+    email_subject: row?.email_subject || defaults.email_subject || "",
+    textarea_placeholder: row?.textarea_placeholder || defaults.textarea_placeholder || "",
+    cta_label: row?.cta_label || defaults.cta_label || "",
+    is_active: row?.is_active ?? defaults.is_active ?? true,
+    items: items
+      .map((item) => ({
+        title: String(item?.title || "").trim(),
+        url: String(item?.url || "").trim(),
+        icon: String(item?.icon || "📥").trim(),
+      }))
+      .filter((item) => item.title),
+    updated_at: row?.updated_at || null,
+  };
+}
+
+function homeWidgetsResponse(rows = []) {
+  const byKey = new Map((rows || []).map((row) => [row.widget_key, row]));
+  const usefulInfo = normalizeHomeWidget(byKey.get("useful_info"), "useful_info");
+  const idea = normalizeHomeWidget(byKey.get("idea"), "idea");
+  return {
+    usefulInfo,
+    useful_info: usefulInfo,
+    idea,
+  };
+}
+
+function buildUsefulInfoPayload(body = {}) {
+  const title = String(body.title || "Faydalı məlumat").trim() || "Faydalı məlumat";
+  const buttonLabel = String(body.button_label || body.buttonLabel || "📚 Faydalı məlumat").trim() || "📚 Faydalı məlumat";
+  const items = Array.isArray(body.items) ? body.items : [];
+  const cleanItems = items
+    .map((item) => ({
+      title: String(item?.title || "").trim(),
+      url: String(item?.url || "").trim(),
+      icon: String(item?.icon || "📥").trim() || "📥",
+    }))
+    .filter((item) => item.title);
+
+  return {
+    widget_key: "useful_info",
+    title,
+    button_label: buttonLabel,
+    description: null,
+    email_to: null,
+    email_subject: null,
+    textarea_placeholder: null,
+    cta_label: null,
+    items: cleanItems,
+    is_active: body.is_active !== undefined ? Boolean(body.is_active) : body.isActive !== undefined ? Boolean(body.isActive) : true,
+  };
+}
+
+function buildIdeaWidgetPayload(body = {}) {
+  return {
+    widget_key: "idea",
+    title: String(body.title || "Yeni ideyan var?").trim() || "Yeni ideyan var?",
+    button_label: String(body.button_label || body.buttonLabel || "💡 Yeni ideyan var?").trim() || "💡 Yeni ideyan var?",
+    description: String(body.description || "Asimos.az-ı necə daha yaxşı edə bilərik? İdeyanı yaz, mail vasitəsilə bizə göndər.").trim(),
+    email_to: String(body.email_to || body.emailTo || "").trim(),
+    email_subject: String(body.email_subject || body.emailSubject || "Asimos.az üçün yeni ideya").trim() || "Asimos.az üçün yeni ideya",
+    textarea_placeholder: String(body.textarea_placeholder || body.textareaPlaceholder || "İdeyanı buraya yaz...").trim() || "İdeyanı buraya yaz...",
+    cta_label: String(body.cta_label || body.ctaLabel || "✉️ Mail ilə göndər").trim() || "✉️ Mail ilə göndər",
+    items: [],
+    is_active: body.is_active !== undefined ? Boolean(body.is_active) : body.isActive !== undefined ? Boolean(body.isActive) : true,
+  };
+}
+
 function profileToUser(profile, authUser) {
   return {
     id: profile?.id || authUser?.id,
@@ -1728,6 +1834,74 @@ app.delete("/admin/sponsored-card", requireAdmin, async (req, res) => {
     if (error) return res.status(400).json({ error: error.message });
     await logEvent("admin_promo_card_disabled", null, { card_type: cardType }).catch(() => null);
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/home-widgets", async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("home_widgets")
+      .select("*")
+      .in("widget_key", ["useful_info", "idea"]);
+
+    if (error) {
+      if (/does not exist|schema cache|home_widgets/i.test(String(error.message || ""))) {
+        return res.json(homeWidgetsResponse([]));
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json(homeWidgetsResponse(data || []));
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/home-widgets", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("home_widgets")
+      .select("*")
+      .in("widget_key", ["useful_info", "idea"]);
+
+    if (error) {
+      if (/does not exist|schema cache|home_widgets/i.test(String(error.message || ""))) {
+        return res.json({ ...homeWidgetsResponse([]), migrationRequired: true });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json(homeWidgetsResponse(data || []));
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.put("/admin/home-widgets", requireAdmin, async (req, res) => {
+  try {
+    const usefulInfo = buildUsefulInfoPayload(req.body?.useful_info || req.body?.usefulInfo || {});
+    const idea = buildIdeaWidgetPayload(req.body?.idea || {});
+
+    if (idea.is_active && !idea.email_to) {
+      return res.status(400).json({ error: "Yeni ideya modalı aktivdirsə email boş ola bilməz" });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from("home_widgets")
+      .upsert([usefulInfo, idea], { onConflict: "widget_key" })
+      .select("*");
+
+    if (error) {
+      if (/does not exist|schema cache|home_widgets/i.test(String(error.message || ""))) {
+        return res.status(400).json({ error: "home_widgets table tapılmadı. Əvvəl home_widgets_migration.sql faylını Supabase SQL Editor-da çalışdırın." });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    await logEvent("admin_home_widgets_saved", null, { keys: ["useful_info", "idea"] }).catch(() => null);
+    return res.json({ ok: true, ...homeWidgetsResponse(data || []) });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
