@@ -1002,6 +1002,56 @@ async function activateScheduledJobs() {
 }
 
 
+
+function normalizeSponsoredCard(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    title: row.title || "",
+    companyName: row.company_name || "",
+    company_name: row.company_name || "",
+    subtitle: row.subtitle || "",
+    description: row.description || "",
+    ctaLabel: row.cta_label || "Ətraflı bax",
+    cta_label: row.cta_label || "Ətraflı bax",
+    ctaUrl: row.cta_url || "",
+    cta_url: row.cta_url || "",
+    logoText: row.logo_text || "AS",
+    logo_text: row.logo_text || "AS",
+    badgeLabel: row.badge_label || "Sponsorlu",
+    badge_label: row.badge_label || "Sponsorlu",
+    isActive: row.is_active !== false,
+    is_active: row.is_active !== false,
+    position: row.position || "latest_jobs",
+    createdAt: row.created_at || null,
+    created_at: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    updated_at: row.updated_at || null,
+  };
+}
+
+function buildSponsoredCardPayload(body = {}) {
+  const title = String(body.title || "").trim();
+  if (!title) return { error: "Başlıq boş ola bilməz" };
+
+  const isActive = body.is_active !== undefined ? Boolean(body.is_active) : body.isActive !== undefined ? Boolean(body.isActive) : true;
+
+  return {
+    data: {
+      title,
+      company_name: body.company_name || body.companyName ? String(body.company_name || body.companyName).trim() : null,
+      subtitle: body.subtitle ? String(body.subtitle).trim() : null,
+      description: body.description ? String(body.description).trim() : null,
+      cta_label: body.cta_label || body.ctaLabel ? String(body.cta_label || body.ctaLabel).trim() : "Ətraflı bax",
+      cta_url: body.cta_url || body.ctaUrl ? String(body.cta_url || body.ctaUrl).trim() : null,
+      logo_text: body.logo_text || body.logoText ? String(body.logo_text || body.logoText).trim().slice(0, 4).toUpperCase() : "AS",
+      badge_label: body.badge_label || body.badgeLabel ? String(body.badge_label || body.badgeLabel).trim() : "Sponsorlu",
+      is_active: isActive,
+      position: body.position ? String(body.position).trim() : "latest_jobs",
+    }
+  };
+}
+
 function profileToUser(profile, authUser) {
   return {
     id: profile?.id || authUser?.id,
@@ -1504,6 +1554,101 @@ app.delete("/admin/users/:id", requireAdmin, async (req, res) => {
     return res.json({ ok: true });
   } catch (e) {
     console.error("[Admin] User deletion route error:", e);
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+
+app.get("/sponsored-card", async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("sponsored_cards")
+      .select("*")
+      .eq("is_active", true)
+      .eq("position", "latest_jobs")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      if (/does not exist|schema cache|sponsored_cards/i.test(String(error.message || ""))) {
+        return res.json({ item: null });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ item: normalizeSponsoredCard(data) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/sponsored-card", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("sponsored_cards")
+      .select("*")
+      .eq("position", "latest_jobs")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      if (/does not exist|schema cache|sponsored_cards/i.test(String(error.message || ""))) {
+        return res.json({ item: null, migrationRequired: true });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    return res.json({ item: normalizeSponsoredCard(data) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.put("/admin/sponsored-card", requireAdmin, async (req, res) => {
+  try {
+    const built = buildSponsoredCardPayload(req.body || {});
+    if (built.error) return res.status(400).json({ error: built.error });
+
+    const { data: existing, error: readError } = await supabaseAdmin
+      .from("sponsored_cards")
+      .select("id")
+      .eq("position", "latest_jobs")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (readError && /does not exist|schema cache|sponsored_cards/i.test(String(readError.message || ""))) {
+      return res.status(400).json({ error: "sponsored_cards table tapılmadı. Əvvəl sponsored_card_migration.sql faylını Supabase SQL Editor-da çalışdırın." });
+    }
+    if (readError) return res.status(400).json({ error: readError.message });
+
+    const query = existing?.id
+      ? supabaseAdmin.from("sponsored_cards").update(built.data).eq("id", existing.id).select("*").single()
+      : supabaseAdmin.from("sponsored_cards").insert(built.data).select("*").single();
+
+    const { data, error } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    await logEvent("admin_sponsored_card_saved", null, { sponsored_card_id: data.id }).catch(() => null);
+    return res.json({ ok: true, item: normalizeSponsoredCard(data) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.delete("/admin/sponsored-card", requireAdmin, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from("sponsored_cards")
+      .update({ is_active: false })
+      .eq("position", "latest_jobs");
+
+    if (error) return res.status(400).json({ error: error.message });
+    await logEvent("admin_sponsored_card_disabled", null, {}).catch(() => null);
+    return res.json({ ok: true });
+  } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
 });
