@@ -2059,7 +2059,13 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       wage: body.wage ? String(body.wage).trim() : null,
       whatsapp: body.whatsapp ? String(body.whatsapp).trim() : null,
       contact_phone: (body.contact_phone || body.phone || body.contactPhone) ? String(body.contact_phone || body.phone || body.contactPhone).trim() : null,
-      contact_link: (body.contact_link || body.link || body.contactLink) ? String(body.contact_link || body.link || body.contactLink).trim() : null,
+      contact_link: (body.contact_link || body.link || body.contactLink || body.ats_link || body.atsLink) ? String(body.contact_link || body.link || body.contactLink || body.ats_link || body.atsLink).trim() : null,
+      ats_link: (body.ats_link || body.atsLink || body.contact_link || body.link || body.contactLink) ? String(body.ats_link || body.atsLink || body.contact_link || body.link || body.contactLink).trim() : null,
+      workplace: (body.workplace || body.workplace_name || body.branch) ? String(body.workplace || body.workplace_name || body.branch).trim() : null,
+      vacancy_start_date: (body.vacancy_start_date || body.vacancyStartDate) ? String(body.vacancy_start_date || body.vacancyStartDate).slice(0, 10) : null,
+      vacancy_end_date: (body.vacancy_end_date || body.vacancyEndDate) ? String(body.vacancy_end_date || body.vacancyEndDate).slice(0, 10) : null,
+      contact_visibility: body.contact_visibility || body.contactVisibility || null,
+      primary_contact: (body.primary_contact || body.primaryContact) ? String(body.primary_contact || body.primaryContact).trim() : null,
       voen: body.voen ? String(body.voen).trim() : null,
       is_daily,
       notify_radius_m: Number.isFinite(notify_radius_m) ? notify_radius_m : null,
@@ -2136,7 +2142,13 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
       wage: patch.wage,
       whatsapp: patch.whatsapp,
       contact_phone: patch.contact_phone ?? patch.phone ?? patch.contactPhone,
-      contact_link: patch.contact_link ?? patch.link ?? patch.contactLink,
+      contact_link: patch.contact_link ?? patch.link ?? patch.contactLink ?? patch.ats_link ?? patch.atsLink,
+      ats_link: patch.ats_link ?? patch.atsLink ?? patch.contact_link ?? patch.link ?? patch.contactLink,
+      workplace: patch.workplace ?? patch.workplace_name ?? patch.branch,
+      vacancy_start_date: (patch.vacancy_start_date !== undefined || patch.vacancyStartDate !== undefined) ? (patch.vacancy_start_date || patch.vacancyStartDate ? String(patch.vacancy_start_date || patch.vacancyStartDate).slice(0, 10) : null) : undefined,
+      vacancy_end_date: (patch.vacancy_end_date !== undefined || patch.vacancyEndDate !== undefined) ? (patch.vacancy_end_date || patch.vacancyEndDate ? String(patch.vacancy_end_date || patch.vacancyEndDate).slice(0, 10) : null) : undefined,
+      contact_visibility: patch.contact_visibility ?? patch.contactVisibility,
+      primary_contact: patch.primary_contact ?? patch.primaryContact,
       voen: patch.voen,
       is_daily: patch.is_daily,
       notify_radius_m: patch.notify_radius_m,
@@ -3949,7 +3961,19 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         views: Number(r.views || 0),
         whatsapp: req.authUser ? (r.whatsapp ?? null) : null,
         phone: req.authUser ? (r.contact_phone ?? null) : null,
-        link: req.authUser ? (r.contact_link ?? null) : null,
+        link: req.authUser ? (r.contact_link ?? r.ats_link ?? null) : null,
+        atsLink: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
+        ats_link: req.authUser ? (r.ats_link ?? r.contact_link ?? null) : null,
+        workplace: r.workplace ?? null,
+        workplace_name: r.workplace ?? null,
+        vacancyStartDate: r.vacancy_start_date ?? null,
+        vacancy_start_date: r.vacancy_start_date ?? null,
+        vacancyEndDate: r.vacancy_end_date ?? null,
+        vacancy_end_date: r.vacancy_end_date ?? null,
+        contactVisibility: r.contact_visibility ?? null,
+        contact_visibility: r.contact_visibility ?? null,
+        primaryContact: r.primary_contact ?? null,
+        primary_contact: r.primary_contact ?? null,
         voen: (r.voen ?? null),
         company_name: (r.company_name ?? null),
         companyName: (r.company_name ?? null),
@@ -4126,7 +4150,19 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       views: Number(data.views || 0),
       whatsapp: req.authUser ? (data.whatsapp ?? null) : null,
       phone: req.authUser ? (data.contact_phone ?? null) : null,
-      link: req.authUser ? (data.contact_link ?? null) : null,
+      link: req.authUser ? (data.contact_link ?? data.ats_link ?? null) : null,
+      atsLink: req.authUser ? (data.ats_link ?? data.contact_link ?? null) : null,
+      ats_link: req.authUser ? (data.ats_link ?? data.contact_link ?? null) : null,
+      workplace: data.workplace ?? null,
+      workplace_name: data.workplace ?? null,
+      vacancyStartDate: data.vacancy_start_date ?? null,
+      vacancy_start_date: data.vacancy_start_date ?? null,
+      vacancyEndDate: data.vacancy_end_date ?? null,
+      vacancy_end_date: data.vacancy_end_date ?? null,
+      contactVisibility: data.contact_visibility ?? null,
+      contact_visibility: data.contact_visibility ?? null,
+      primaryContact: data.primary_contact ?? null,
+      primary_contact: data.primary_contact ?? null,
       voen: (data.voen ?? null),
       company_name: (data.company_name ?? null),
       companyName: (data.company_name ?? null),
@@ -4286,6 +4322,18 @@ app.post("/jobs", requireAuth, async (req, res) => {
       link,
       contactPhone,
       contactLink,
+      atsLink,
+      ats_link,
+      workplace,
+      workplace_name,
+      vacancyStartDate,
+      vacancy_start_date,
+      vacancyEndDate,
+      vacancy_end_date,
+      contactVisibility,
+      contact_visibility,
+      primaryContact,
+      primary_contact,
       voen,
       isDaily,
       jobType,
@@ -4377,7 +4425,13 @@ app.post("/jobs", requireAuth, async (req, res) => {
       wage: wage || null,
       whatsapp: whatsapp || null,
       contact_phone: (contactPhone || phone) ? String(contactPhone || phone).trim() : null,
-      contact_link: (contactLink || link) ? String(contactLink || link).trim() : null,
+      contact_link: (contactLink || atsLink || ats_link || link) ? String(contactLink || atsLink || ats_link || link).trim() : null,
+      ats_link: (atsLink || ats_link || contactLink || link) ? String(atsLink || ats_link || contactLink || link).trim() : null,
+      workplace: (workplace || workplace_name) ? String(workplace || workplace_name).trim() : null,
+      vacancy_start_date: (vacancyStartDate || vacancy_start_date) ? String(vacancyStartDate || vacancy_start_date).slice(0, 10) : null,
+      vacancy_end_date: (vacancyEndDate || vacancy_end_date) ? String(vacancyEndDate || vacancy_end_date).slice(0, 10) : null,
+      contact_visibility: contactVisibility || contact_visibility || null,
+      primary_contact: (primaryContact || primary_contact) ? String(primaryContact || primary_contact).trim() : null,
       voen: voen ? String(voen).trim() : null,
       is_daily: jt === "temporary",
       job_type: jt,
@@ -4418,6 +4472,12 @@ app.post("/jobs", requireAuth, async (req, res) => {
         fallback.image_url = undefined;
         fallback.start_time = undefined;
         fallback.end_time = undefined;
+        fallback.ats_link = undefined;
+        fallback.workplace = undefined;
+        fallback.vacancy_start_date = undefined;
+        fallback.vacancy_end_date = undefined;
+        fallback.contact_visibility = undefined;
+        fallback.primary_contact = undefined;
 
         const r2 = await supabaseAdmin
           .from("jobs")
@@ -4573,8 +4633,26 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
       contact_phone: (body.contactPhone !== undefined || body.phone !== undefined)
         ? (body.contactPhone || body.phone ? String(body.contactPhone || body.phone).trim() : null)
         : undefined,
-      contact_link: (body.contactLink !== undefined || body.link !== undefined)
-        ? (body.contactLink || body.link ? String(body.contactLink || body.link).trim() : null)
+      contact_link: (body.contactLink !== undefined || body.link !== undefined || body.atsLink !== undefined || body.ats_link !== undefined)
+        ? (body.contactLink || body.link || body.atsLink || body.ats_link ? String(body.contactLink || body.link || body.atsLink || body.ats_link).trim() : null)
+        : undefined,
+      ats_link: (body.atsLink !== undefined || body.ats_link !== undefined || body.contactLink !== undefined || body.link !== undefined)
+        ? (body.atsLink || body.ats_link || body.contactLink || body.link ? String(body.atsLink || body.ats_link || body.contactLink || body.link).trim() : null)
+        : undefined,
+      workplace: (body.workplace !== undefined || body.workplace_name !== undefined || body.branch !== undefined)
+        ? (body.workplace || body.workplace_name || body.branch ? String(body.workplace || body.workplace_name || body.branch).trim() : null)
+        : undefined,
+      vacancy_start_date: (body.vacancyStartDate !== undefined || body.vacancy_start_date !== undefined)
+        ? (body.vacancyStartDate || body.vacancy_start_date ? String(body.vacancyStartDate || body.vacancy_start_date).slice(0, 10) : null)
+        : undefined,
+      vacancy_end_date: (body.vacancyEndDate !== undefined || body.vacancy_end_date !== undefined)
+        ? (body.vacancyEndDate || body.vacancy_end_date ? String(body.vacancyEndDate || body.vacancy_end_date).slice(0, 10) : null)
+        : undefined,
+      contact_visibility: (body.contactVisibility !== undefined || body.contact_visibility !== undefined)
+        ? (body.contactVisibility || body.contact_visibility || null)
+        : undefined,
+      primary_contact: (body.primaryContact !== undefined || body.primary_contact !== undefined)
+        ? (body.primaryContact || body.primary_contact ? String(body.primaryContact || body.primary_contact).trim() : null)
         : undefined,
       voen: body.voen !== undefined ? (body.voen ? String(body.voen).trim() : null) : undefined,
       job_level: (body.jobLevel !== undefined || body.job_level !== undefined || body.positionLevel !== undefined || body.level !== undefined)
