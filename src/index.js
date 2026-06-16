@@ -1859,6 +1859,72 @@ app.get("/home-widgets", async (req, res) => {
   }
 });
 
+function escapeIdeaHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+app.post("/home-widgets/idea", async (req, res) => {
+  try {
+    const message = String(req.body?.message || "").trim();
+    const senderName = String(req.body?.name || "").trim();
+    const senderEmail = String(req.body?.email || "").trim();
+
+    if (!message) return res.status(400).json({ error: "Mesaj boş ola bilməz" });
+    if (message.length > 5000) return res.status(400).json({ error: "Mesaj çox uzundur" });
+
+    const { data, error } = await supabaseAdmin
+      .from("home_widgets")
+      .select("*")
+      .eq("widget_key", "idea")
+      .maybeSingle();
+
+    const idea = normalizeHomeWidget(error ? null : data, "idea");
+
+    if (idea.is_active === false) {
+      return res.status(400).json({ error: "Yeni ideya formu hazırda aktiv deyil" });
+    }
+
+    const toEmail = String(idea.email_to || SMTP_USER || ADMIN_EMAIL || "").trim();
+    const subject = String(idea.email_subject || "Asimos.az üçün yeni ideya").trim();
+
+    if (!toEmail) return res.status(400).json({ error: "Göndəriləcək email təyin edilməyib" });
+    if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+      return res.status(500).json({ error: "SMTP ayarları tamamlanmayıb" });
+    }
+
+    const escapedMessage = escapeIdeaHtml(message).replace(/\n/g, "<br>");
+    const metaLines = [
+      senderName ? `<p><b>Ad:</b> ${escapeIdeaHtml(senderName)}</p>` : "",
+      senderEmail ? `<p><b>Email:</b> ${escapeIdeaHtml(senderEmail)}</p>` : "",
+    ].filter(Boolean).join("");
+
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: toEmail,
+      subject,
+      text: [
+        "Yeni ideya mesajı",
+        "",
+        senderName ? `Ad: ${senderName}` : null,
+        senderEmail ? `Email: ${senderEmail}` : null,
+        "Mesaj:",
+        message,
+      ].filter(Boolean).join("\n"),
+      html: `<h2>Yeni ideya mesajı</h2>${metaLines}<p><b>Mesaj:</b></p><p>${escapedMessage}</p>`,
+    });
+
+    await logEvent("home_idea_submitted", null, { has_sender_email: Boolean(senderEmail) }).catch(() => null);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Mesaj göndərilmədi" });
+  }
+});
+
 app.get("/admin/home-widgets", requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
