@@ -839,6 +839,13 @@ function slugify(input) {
   return String(input || "")
     .trim()
     .toLowerCase()
+    .replace(/ə/g, "e")
+    .replace(/ö/g, "o")
+    .replace(/ü/g, "u")
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ş/g, "s")
+    .replace(/ç/g, "c")
     .replace(/['"]/g, "")
     .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-")
@@ -4110,6 +4117,39 @@ app.get("/jobs", optionalAuth, async (req, res) => {
     }
 
     return res.json(items);
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+
+app.get("/jobs/slug/:categorySlug/:titleSlug", optionalAuth, async (req, res) => {
+  try {
+    const categorySlug = String(req.params.categorySlug || "").trim().toLowerCase();
+    const titleSlug = String(req.params.titleSlug || "").trim().toLowerCase();
+    if (!categorySlug || !titleSlug) return res.status(400).json({ error: "slug required" });
+
+    await cleanupExpiredJobs();
+    await activateScheduledJobs();
+
+    const nowIso = new Date().toISOString();
+    const { data, error } = await supabaseAdmin
+      .from("jobs")
+      .select("id,title,category,status,published_at,created_at")
+      .eq("status", "open")
+      .or(`published_at.is.null,published_at.lte.${nowIso}`)
+      .order("created_at", { ascending: false })
+      .limit(5000);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const rows = data || [];
+    const exact = rows.find((row) => slugify(row.category) === categorySlug && slugify(row.title) === titleSlug);
+    const titleOnly = rows.find((row) => slugify(row.title) === titleSlug);
+    const found = exact || titleOnly || null;
+
+    if (!found) return res.status(404).json({ error: "Not found" });
+    return res.json({ id: found.id });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
