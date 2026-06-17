@@ -4534,6 +4534,12 @@ app.post("/jobs", requireAuth, async (req, res) => {
 
     const selectedPublishAt = published_at || publishedAt || publish_at || publishAt;
 
+    const profilePhone = profile?.phone ? String(profile.phone).trim() : "";
+    const profileEmail = profile?.email ? String(profile.email).trim() : "";
+    const resolvedPhone = String(contactPhone || phone || profilePhone || "").trim();
+    const resolvedWhatsapp = String(whatsapp || contact_whatsapp || resolvedPhone || "").trim();
+    const resolvedEmail = String(contactEmail || contact_email || email || profileEmail || "").trim();
+
     const payload = {
       created_by: req.authUser.id,
       status: initialStatus,
@@ -4541,9 +4547,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
       category: category || null,
       description: description || "",
       wage: wage || null,
-      whatsapp: (whatsapp || contact_whatsapp || contactPhone || phone) ? String(whatsapp || contact_whatsapp || contactPhone || phone).trim() : null,
-      contact_phone: (contactPhone || phone || whatsapp || contact_whatsapp) ? String(contactPhone || phone || whatsapp || contact_whatsapp).trim() : null,
-      contact_email: (contactEmail || contact_email || email) ? String(contactEmail || contact_email || email).trim() : null,
+      whatsapp: resolvedWhatsapp || null,
+      contact_phone: resolvedPhone || null,
+      contact_email: resolvedEmail || null,
       contact_link: (contactLink || atsLink || ats_link || link) ? String(contactLink || atsLink || ats_link || link).trim() : null,
       ats_link: (atsLink || ats_link || contactLink || link) ? String(atsLink || ats_link || contactLink || link).trim() : null,
       workplace: (workplace || workplace_name) ? String(workplace || workplace_name).trim() : null,
