@@ -4135,7 +4135,7 @@ app.get("/jobs/slug/:categorySlug/:titleSlug", optionalAuth, async (req, res) =>
     const nowIso = new Date().toISOString();
     const { data, error } = await supabaseAdmin
       .from("jobs")
-      .select("id,title,category,status,published_at,created_at")
+      .select("*")
       .eq("status", "open")
       .or(`published_at.is.null,published_at.lte.${nowIso}`)
       .order("created_at", { ascending: false })
@@ -4144,12 +4144,22 @@ app.get("/jobs/slug/:categorySlug/:titleSlug", optionalAuth, async (req, res) =>
     if (error) return res.status(400).json({ error: error.message });
 
     const rows = data || [];
-    const exact = rows.find((row) => slugify(row.category) === categorySlug && slugify(row.title) === titleSlug);
-    const titleOnly = rows.find((row) => slugify(row.title) === titleSlug);
+    const exact = rows.find((row) => {
+      const rowCategorySlug = slugify(
+        row.category ||
+        row.category_name ||
+        row.categoryName ||
+        row.job_category ||
+        row.jobCategory ||
+        "Müxtəlif"
+      );
+      return rowCategorySlug === categorySlug && slugify(row.title || row.name) === titleSlug;
+    });
+    const titleOnly = rows.find((row) => slugify(row.title || row.name) === titleSlug);
     const found = exact || titleOnly || null;
 
     if (!found) return res.status(404).json({ error: "Not found" });
-    return res.json({ id: found.id });
+    return res.json(found);
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
