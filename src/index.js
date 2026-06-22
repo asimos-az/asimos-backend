@@ -1207,7 +1207,13 @@ function profileToUser(profile, authUser) {
     logo_url: profile?.logo_url || null,
     profileLogoUrl: profile?.logo_url || null,
     email: authUser?.email || profile?.email || null,
+    contactEmail: profile?.contact_email || authUser?.email || profile?.email || null,
+    contact_email: profile?.contact_email || authUser?.email || profile?.email || null,
     phone: profile?.phone || null,
+    whatsapp: profile?.whatsapp || null,
+    voen: profile?.voen || null,
+    atsLink: profile?.ats_link || null,
+    ats_link: profile?.ats_link || null,
     location: profile?.location || null,
     notifSoundEnabled: profile?.notif_sound_enabled ?? true,
     notifSoundName: profile?.notif_sound_name || "default",
@@ -2901,7 +2907,7 @@ app.post("/auth/refresh", async (req, res) => {
 
 app.patch("/me/profile", requireAuth, async (req, res) => {
   try {
-    const { fullName, phone, location, companyName, logoUrl } = req.body || {};
+    const { fullName, phone, location, companyName, logoUrl, voen, whatsapp, contactEmail, atsLink } = req.body || {};
     const updates = {};
     if (typeof fullName === "string" && fullName.trim().length >= 2) updates.full_name = fullName.trim();
     if (typeof phone === "string" && phone.trim().length >= 5) updates.phone = phone.trim();
@@ -2911,6 +2917,10 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
     if (currentProfile?.role === "employer") {
       if (companyName !== undefined) updates.company_name = String(companyName || "").trim() || null;
       if (logoUrl !== undefined) updates.logo_url = logoUrl ? String(logoUrl).trim() : null;
+      if (voen !== undefined) updates.voen = String(voen || "").trim() || null;
+      if (whatsapp !== undefined) updates.whatsapp = String(whatsapp || "").trim() || null;
+      if (contactEmail !== undefined) updates.contact_email = String(contactEmail || "").trim() || null;
+      if (atsLink !== undefined) updates.ats_link = String(atsLink || "").trim() || null;
     }
 
     if (!Object.keys(updates).length) return res.status(400).json({ error: "Yenilənəcək məlumat yoxdur" });
