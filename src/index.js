@@ -3090,12 +3090,12 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
       return res.status(400).json({ error: tokErr.message || "Update failed" });
     }
 
-    await supabaseAdmin
-      .from("profiles")
-      .update({ expo_push_token: expoPushToken })
-      .eq("id", req.authUser.id)
-      .then(() => { })
-      .catch(() => { });
+    try {
+      await supabaseAdmin
+        .from("profiles")
+        .update({ expo_push_token: expoPushToken })
+        .eq("id", req.authUser.id);
+    } catch { }
     await logEvent("push_token_saved", req.authUser.id, { hasToken: true });
     return res.json({ ok: true });
   } catch (e) {
@@ -3105,19 +3105,19 @@ app.post("/me/push-token", requireAuth, async (req, res) => {
 
 app.delete("/me/push-token", requireAuth, async (req, res) => {
   try {
-    await supabaseAdmin
-      .from("push_tokens")
-      .delete()
-      .eq("user_id", req.authUser.id)
-      .then(() => { })
-      .catch(() => { });
+    try {
+      await supabaseAdmin
+        .from("push_tokens")
+        .delete()
+        .eq("user_id", req.authUser.id);
+    } catch { }
 
-    await supabaseAdmin
-      .from("profiles")
-      .update({ expo_push_token: null })
-      .eq("id", req.authUser.id)
-      .then(() => { })
-      .catch(() => { });
+    try {
+      await supabaseAdmin
+        .from("profiles")
+        .update({ expo_push_token: null })
+        .eq("id", req.authUser.id);
+    } catch { }
 
     await logEvent("push_token_removed", req.authUser.id, { hasToken: false });
     return res.json({ ok: true });
@@ -3984,9 +3984,20 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         const pubMs = r.published_at ? Date.parse(r.published_at) : NaN;
         if (!isNaN(pubMs) && pubMs <= nowMs) {
           status = "open";
-          supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", r.id).eq("status", "scheduled").then(() => {
-            console.log(`[inline-activate] Job ${r.id} set to open (was scheduled, published_at=${r.published_at})`);
-          }).catch((e) => console.error("[inline-activate] Error:", e?.message));
+          (async () => {
+            try {
+              const { error: inlineActivateError } = await supabaseAdmin
+                .from("jobs")
+                .update({ status: "open" })
+                .eq("id", r.id)
+                .eq("status", "scheduled");
+
+              if (inlineActivateError) throw inlineActivateError;
+              console.log(`[inline-activate] Job ${r.id} set to open (was scheduled, published_at=${r.published_at})`);
+            } catch (e) {
+              console.error("[inline-activate] Error:", e?.message || e);
+            }
+          })();
         }
       }
 
@@ -4235,9 +4246,20 @@ app.get("/jobs/:id", optionalAuth, async (req, res) => {
       const pubMs = data.published_at ? Date.parse(data.published_at) : NaN;
       if (!isNaN(pubMs) && pubMs <= Date.now()) {
         singleStatus = "open";
-        supabaseAdmin.from("jobs").update({ status: "open" }).eq("id", data.id).eq("status", "scheduled").then(() => {
-          console.log(`[inline-activate-single] Job ${data.id} set to open`);
-        }).catch((e) => console.error("[inline-activate-single] Error:", e?.message));
+        (async () => {
+          try {
+            const { error: inlineActivateError } = await supabaseAdmin
+              .from("jobs")
+              .update({ status: "open" })
+              .eq("id", data.id)
+              .eq("status", "scheduled");
+
+            if (inlineActivateError) throw inlineActivateError;
+            console.log(`[inline-activate-single] Job ${data.id} set to open`);
+          } catch (e) {
+            console.error("[inline-activate-single] Error:", e?.message || e);
+          }
+        })();
       }
     }
 
@@ -5608,7 +5630,20 @@ async function notifyProfileChangeDecision(request, decision, reason = "") {
     data: { type: "profile_change_request", requestId: request.id, status: decision },
   }]).catch(() => null);
 
-  const { data: tokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", request.user_id).catch(() => ({ data: [] }));
+  let tokens = [];
+  try {
+    const tokensResult = await supabaseAdmin
+      .from("push_tokens")
+      .select("expo_push_token")
+      .eq("user_id", request.user_id);
+
+    if (!tokensResult.error && Array.isArray(tokensResult.data)) {
+      tokens = tokensResult.data;
+    }
+  } catch (error) {
+    console.warn("Profile change push token lookup skipped:", error?.message || error);
+  }
+
   const messages = (tokens || []).filter((t) => t.expo_push_token).map((t) => ({
     to: t.expo_push_token,
     title,
@@ -5618,8 +5653,27 @@ async function notifyProfileChangeDecision(request, decision, reason = "") {
   }));
   if (messages.length) await sendExpoPush(messages).catch(() => null);
 
-  const { data: authData } = await supabaseAdmin.auth.admin.getUserById(request.user_id).catch(() => ({ data: null }));
-  const { data: prof } = await supabaseAdmin.from("profiles").select("full_name, company_name").eq("id", request.user_id).maybeSingle().catch(() => ({ data: null }));
+  let authData = null;
+  try {
+    const authResult = await supabaseAdmin.auth.admin.getUserById(request.user_id);
+    authData = authResult?.data || null;
+  } catch (error) {
+    console.warn("Profile change auth user lookup skipped:", error?.message || error);
+  }
+
+  let prof = null;
+  try {
+    const profileResult = await supabaseAdmin
+      .from("profiles")
+      .select("full_name, company_name")
+      .eq("id", request.user_id)
+      .maybeSingle();
+
+    if (!profileResult.error) prof = profileResult.data || null;
+  } catch (error) {
+    console.warn("Profile change profile lookup skipped:", error?.message || error);
+  }
+
   const toEmail = authData?.user?.email || null;
   await sendProfileChangeDecisionEmail(
     toEmail,
