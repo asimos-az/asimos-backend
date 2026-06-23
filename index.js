@@ -5608,7 +5608,20 @@ async function notifyProfileChangeDecision(request, decision, reason = "") {
     data: { type: "profile_change_request", requestId: request.id, status: decision },
   }]).catch(() => null);
 
-  const { data: tokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", request.user_id).catch(() => ({ data: [] }));
+  let tokens = [];
+  try {
+    const tokensResult = await supabaseAdmin
+      .from("push_tokens")
+      .select("expo_push_token")
+      .eq("user_id", request.user_id);
+
+    if (!tokensResult.error && Array.isArray(tokensResult.data)) {
+      tokens = tokensResult.data;
+    }
+  } catch (error) {
+    console.warn("Profile change push token lookup skipped:", error?.message || error);
+  }
+
   const messages = (tokens || []).filter((t) => t.expo_push_token).map((t) => ({
     to: t.expo_push_token,
     title,
@@ -5618,8 +5631,27 @@ async function notifyProfileChangeDecision(request, decision, reason = "") {
   }));
   if (messages.length) await sendExpoPush(messages).catch(() => null);
 
-  const { data: authData } = await supabaseAdmin.auth.admin.getUserById(request.user_id).catch(() => ({ data: null }));
-  const { data: prof } = await supabaseAdmin.from("profiles").select("full_name, company_name").eq("id", request.user_id).maybeSingle().catch(() => ({ data: null }));
+  let authData = null;
+  try {
+    const authResult = await supabaseAdmin.auth.admin.getUserById(request.user_id);
+    authData = authResult?.data || null;
+  } catch (error) {
+    console.warn("Profile change auth user lookup skipped:", error?.message || error);
+  }
+
+  let prof = null;
+  try {
+    const profileResult = await supabaseAdmin
+      .from("profiles")
+      .select("full_name, company_name")
+      .eq("id", request.user_id)
+      .maybeSingle();
+
+    if (!profileResult.error) prof = profileResult.data || null;
+  } catch (error) {
+    console.warn("Profile change profile lookup skipped:", error?.message || error);
+  }
+
   const toEmail = authData?.user?.email || null;
   await sendProfileChangeDecisionEmail(
     toEmail,
