@@ -83,6 +83,33 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
   }
 }
 
+
+async function sendProfileChangeDecisionEmail(toEmail, fullName, decision, fieldLabel, oldValue, newValue, reason = "") {
+  if (!SMTP_HOST || !SMTP_USER || !toEmail) {
+    console.warn("Profile change decision email skipped", { hasSmtp: Boolean(SMTP_HOST && SMTP_USER), toEmail });
+    return;
+  }
+
+  const approved = decision === "approved";
+  const subject = approved
+    ? "ASIMOS - Dəyişiklik sorğunuz təsdiqləndi"
+    : "ASIMOS - Dəyişiklik sorğunuz rədd edildi";
+  const safeName = fullName || "İstifadəçi";
+  const text = approved
+    ? `Salam ${safeName},\n\n${fieldLabel} üçün göndərdiyiniz dəyişiklik sorğusu admin tərəfindən təsdiqləndi və məlumat hesabınızda yeniləndi.\n\nKöhnə dəyər: ${oldValue || "Boş idi"}\nYeni dəyər: ${newValue || ""}\n\nHörmətlə,\nAsimos Komandası`
+    : `Salam ${safeName},\n\n${fieldLabel} üçün göndərdiyiniz dəyişiklik sorğusu admin tərəfindən rədd edildi.\n\nKöhnə dəyər: ${oldValue || "Boş idi"}\nYeni dəyər: ${newValue || ""}${reason ? `\nSəbəb: ${reason}` : ""}\n\nHörmətlə,\nAsimos Komandası`;
+
+  const html = approved
+    ? `<p>Salam <b>${safeName}</b>,</p><p><b>${fieldLabel}</b> üçün göndərdiyiniz dəyişiklik sorğusu admin tərəfindən təsdiqləndi və məlumat hesabınızda yeniləndi.</p><p><b>Köhnə dəyər:</b> ${oldValue || "Boş idi"}<br/><b>Yeni dəyər:</b> ${newValue || ""}</p><p>Hörmətlə,<br/>Asimos Komandası</p>`
+    : `<p>Salam <b>${safeName}</b>,</p><p><b>${fieldLabel}</b> üçün göndərdiyiniz dəyişiklik sorğusu admin tərəfindən rədd edildi.</p><p><b>Köhnə dəyər:</b> ${oldValue || "Boş idi"}<br/><b>Yeni dəyər:</b> ${newValue || ""}</p>${reason ? `<p><b>Səbəb:</b> ${reason}</p>` : ""}<p>Hörmətlə,<br/>Asimos Komandası</p>`;
+
+  try {
+    await mailer.sendMail({ from: SMTP_FROM, to: toEmail, subject, text, html });
+  } catch (e) {
+    console.error("Profile change decision email failed:", e?.message || e);
+  }
+}
+
 const app = express();
 const server = createServer(app);
 const io = new SocketIOServer(server, {
@@ -1207,11 +1234,12 @@ function profileToUser(profile, authUser) {
     logo_url: profile?.logo_url || null,
     profileLogoUrl: profile?.logo_url || null,
     email: authUser?.email || profile?.email || null,
-    contactEmail: profile?.contact_email || authUser?.email || profile?.email || null,
-    contact_email: profile?.contact_email || authUser?.email || profile?.email || null,
     phone: profile?.phone || null,
     whatsapp: profile?.whatsapp || null,
+    whatsapp_number: profile?.whatsapp || null,
     voen: profile?.voen || null,
+    contactEmail: profile?.contact_email || null,
+    contact_email: profile?.contact_email || null,
     atsLink: profile?.ats_link || null,
     ats_link: profile?.ats_link || null,
     location: profile?.location || null,
@@ -2905,9 +2933,18 @@ app.post("/auth/refresh", async (req, res) => {
 
 
 
+app.get("/me", requireAuth, async (req, res) => {
+  try {
+    const profile = await getProfile(req.authUser.id);
+    return res.json({ user: profileToUser(profile, req.authUser) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
 app.patch("/me/profile", requireAuth, async (req, res) => {
   try {
-    const { fullName, phone, location, companyName, logoUrl, voen, whatsapp, contactEmail, atsLink } = req.body || {};
+    const { fullName, phone, location, companyName, logoUrl } = req.body || {};
     const updates = {};
     if (typeof fullName === "string" && fullName.trim().length >= 2) updates.full_name = fullName.trim();
     if (typeof phone === "string" && phone.trim().length >= 5) updates.phone = phone.trim();
@@ -2917,10 +2954,6 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
     if (currentProfile?.role === "employer") {
       if (companyName !== undefined) updates.company_name = String(companyName || "").trim() || null;
       if (logoUrl !== undefined) updates.logo_url = logoUrl ? String(logoUrl).trim() : null;
-      if (voen !== undefined) updates.voen = String(voen || "").trim() || null;
-      if (whatsapp !== undefined) updates.whatsapp = String(whatsapp || "").trim() || null;
-      if (contactEmail !== undefined) updates.contact_email = String(contactEmail || "").trim() || null;
-      if (atsLink !== undefined) updates.ats_link = String(atsLink || "").trim() || null;
     }
 
     if (!Object.keys(updates).length) return res.status(400).json({ error: "Yenilənəcək məlumat yoxdur" });
@@ -5429,6 +5462,261 @@ async function processJobAlerts(job) {
   } catch (e) {
   }
 }
+
+
+// --- PROFILE CHANGE REQUESTS ---
+
+const PROFILE_CHANGE_FIELD_MAP = {
+  companyName: { column: "company_name", label: "Şirkət adı" },
+  company_name: { column: "company_name", label: "Şirkət adı" },
+  voen: { column: "voen", label: "VÖEN" },
+  phone: { column: "phone", label: "Telefon" },
+  whatsapp: { column: "whatsapp", label: "WhatsApp" },
+  contactEmail: { column: "contact_email", label: "E-poçt" },
+  contact_email: { column: "contact_email", label: "E-poçt" },
+  atsLink: { column: "ats_link", label: "ATS linki" },
+  ats_link: { column: "ats_link", label: "ATS linki" },
+};
+
+function normalizeChangeRequestField(fieldKey) {
+  const key = String(fieldKey || "").trim();
+  return PROFILE_CHANGE_FIELD_MAP[key] ? key : null;
+}
+
+function emitProfileChangeRequestUpdate(requestId, userId, payload = {}) {
+  const data = { requestId, userId, ...payload, at: new Date().toISOString() };
+  io.to("admins").emit("profile-change-request:updated", data);
+  io.to("admins").emit("support:updated", data);
+  if (userId) io.to(`user:${userId}`).emit("support:updated", data);
+}
+
+async function createProfileChangeTicket({ userId, fieldLabel, oldValue, newValue, requestId }) {
+  try {
+    const message = [
+      "İşəgötürən panelindən dəyişiklik sorğusu",
+      `Sahə: ${fieldLabel}`,
+      `Köhnə dəyər: ${oldValue || "Boş idi"}`,
+      `Yeni dəyər: ${newValue || ""}`,
+      `Sorğu ID: ${requestId}`,
+    ].join("\n");
+
+    const { data: ticket } = await supabaseAdmin.from("support_tickets").insert({
+      user_id: userId,
+      subject: "Dəyişiklik sorğusu",
+      message,
+      status: "open",
+    }).select().single();
+
+    if (ticket?.id) {
+      await supabaseAdmin.from("support_messages").insert({
+        ticket_id: ticket.id,
+        sender_id: userId,
+        is_admin: false,
+        message,
+      });
+      emitSupportUpdate(ticket.id, userId, { type: "profile_change_request_created", requestId });
+    }
+  } catch (e) {
+    console.warn("Profile change support ticket creation skipped:", e?.message || e);
+  }
+}
+
+app.post("/profile-change-requests", requireAuth, async (req, res) => {
+  try {
+    const { fieldKey, fieldLabel, oldValue, newValue, hasSavedValue } = req.body || {};
+    const normalizedKey = normalizeChangeRequestField(fieldKey);
+    if (!normalizedKey) return res.status(400).json({ error: "Düzgün sahə seçilməyib" });
+
+    const nextValue = String(newValue || "").trim();
+    if (!nextValue) return res.status(400).json({ error: "Yeni dəyər yazılmayıb" });
+
+    const fieldMeta = PROFILE_CHANGE_FIELD_MAP[normalizedKey];
+    const label = String(fieldLabel || fieldMeta.label || normalizedKey).trim();
+    const currentProfile = await getProfile(req.authUser.id);
+    const currentValue = currentProfile?.[fieldMeta.column] ?? oldValue ?? null;
+
+    const { data: request, error } = await supabaseAdmin.from("profile_change_requests").insert({
+      user_id: req.authUser.id,
+      field_key: normalizedKey,
+      field_label: label,
+      db_column: fieldMeta.column,
+      old_value: currentValue ? String(currentValue) : null,
+      new_value: nextValue,
+      has_saved_value: Boolean(hasSavedValue),
+      status: "pending",
+    }).select().single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    await createProfileChangeTicket({
+      userId: req.authUser.id,
+      fieldLabel: label,
+      oldValue: currentValue ? String(currentValue) : "",
+      newValue: nextValue,
+      requestId: request.id,
+    });
+
+    await logEvent("profile_change_request", req.authUser.id, {
+      requestId: request.id,
+      fieldKey: normalizedKey,
+      oldValue: currentValue,
+      newValue: nextValue,
+      status: "pending",
+    });
+
+    emitProfileChangeRequestUpdate(request.id, req.authUser.id, { type: "created" });
+    return res.json({ ok: true, request });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.get("/admin/profile-change-requests", requireAdmin, async (req, res) => {
+  try {
+    const status = String(req.query.status || "").trim();
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 100)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    let query = supabaseAdmin
+      .from("profile_change_requests")
+      .select("*, profiles(full_name, phone, company_name, logo_url)", { count: "exact" })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (["pending", "approved", "rejected"].includes(status)) query = query.eq("status", status);
+
+    const { data, error, count } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    return res.json({ items: data || [], total: count || 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+async function notifyProfileChangeDecision(request, decision, reason = "") {
+  const approved = decision === "approved";
+  const title = approved ? "Dəyişiklik təsdiqləndi" : "Dəyişiklik rədd edildi";
+  const body = approved
+    ? `${request.field_label || "Məlumat"} hesabınızda yeniləndi.`
+    : `${request.field_label || "Məlumat"} üzrə dəyişiklik sorğunuz rədd edildi.${reason ? ` Səbəb: ${reason}` : ""}`;
+
+  await insertNotifications([{
+    user_id: request.user_id,
+    title,
+    body,
+    data: { type: "profile_change_request", requestId: request.id, status: decision },
+  }]).catch(() => null);
+
+  const { data: tokens } = await supabaseAdmin.from("push_tokens").select("expo_push_token").eq("user_id", request.user_id).catch(() => ({ data: [] }));
+  const messages = (tokens || []).filter((t) => t.expo_push_token).map((t) => ({
+    to: t.expo_push_token,
+    title,
+    body,
+    data: { type: "profile_change_request", requestId: request.id, status: decision },
+    sound: "default",
+  }));
+  if (messages.length) await sendExpoPush(messages).catch(() => null);
+
+  const { data: authData } = await supabaseAdmin.auth.admin.getUserById(request.user_id).catch(() => ({ data: null }));
+  const { data: prof } = await supabaseAdmin.from("profiles").select("full_name, company_name").eq("id", request.user_id).maybeSingle().catch(() => ({ data: null }));
+  const toEmail = authData?.user?.email || null;
+  await sendProfileChangeDecisionEmail(
+    toEmail,
+    prof?.full_name || prof?.company_name || "İstifadəçi",
+    decision,
+    request.field_label || "Məlumat",
+    request.old_value || "",
+    request.new_value || "",
+    reason
+  );
+}
+
+app.patch("/admin/profile-change-requests/:id/approve", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: request, error: reqError } = await supabaseAdmin
+      .from("profile_change_requests")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (reqError) return res.status(400).json({ error: reqError.message });
+    if (!request) return res.status(404).json({ error: "Sorğu tapılmadı" });
+    if (request.status !== "pending") return res.status(400).json({ error: "Bu sorğu artıq cavablandırılıb" });
+
+    const fieldMeta = PROFILE_CHANGE_FIELD_MAP[request.field_key] || null;
+    const dbColumn = request.db_column || fieldMeta?.column;
+    if (!dbColumn) return res.status(400).json({ error: "Sahə xəritəsi tapılmadı" });
+
+    const { error: updateError } = await supabaseAdmin
+      .from("profiles")
+      .update({ [dbColumn]: request.new_value })
+      .eq("id", request.user_id);
+
+    if (updateError) return res.status(400).json({ error: updateError.message });
+
+    const { data: updatedRequest, error: statusError } = await supabaseAdmin
+      .from("profile_change_requests")
+      .update({
+        status: "approved",
+        admin_note: req.body?.adminNote || null,
+        decided_at: new Date().toISOString(),
+        decided_by: req.admin?.email || "admin",
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (statusError) return res.status(400).json({ error: statusError.message });
+
+    await notifyProfileChangeDecision(updatedRequest, "approved");
+    emitProfileChangeRequestUpdate(id, updatedRequest.user_id, { type: "profile_change_request_approved" });
+    await logEvent("profile_change_request_approved", updatedRequest.user_id, { requestId: id, fieldKey: updatedRequest.field_key });
+
+    return res.json({ ok: true, request: updatedRequest });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
+
+app.patch("/admin/profile-change-requests/:id/reject", requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const reason = String(req.body?.reason || req.body?.adminNote || "").trim();
+    const { data: request, error: reqError } = await supabaseAdmin
+      .from("profile_change_requests")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (reqError) return res.status(400).json({ error: reqError.message });
+    if (!request) return res.status(404).json({ error: "Sorğu tapılmadı" });
+    if (request.status !== "pending") return res.status(400).json({ error: "Bu sorğu artıq cavablandırılıb" });
+
+    const { data: updatedRequest, error } = await supabaseAdmin
+      .from("profile_change_requests")
+      .update({
+        status: "rejected",
+        admin_note: reason || null,
+        decided_at: new Date().toISOString(),
+        decided_by: req.admin?.email || "admin",
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    await notifyProfileChangeDecision(updatedRequest, "rejected", reason);
+    emitProfileChangeRequestUpdate(id, updatedRequest.user_id, { type: "profile_change_request_rejected" });
+    await logEvent("profile_change_request_rejected", updatedRequest.user_id, { requestId: id, fieldKey: updatedRequest.field_key, reason });
+
+    return res.json({ ok: true, request: updatedRequest });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Server error" });
+  }
+});
 
 // --- SUPPORT SYSTEM ---
 
