@@ -3687,26 +3687,51 @@ app.get("/admin/role-switch-requests", requireAdmin, async (req, res) => {
   try {
     const statusFilter = (req.query.status || "pending").toString().trim();
 
-    const { data: requests, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from("role_switch_requests")
       .select("*")
       .eq("status", statusFilter)
-      .order("requested_at", { ascending: false });
+      .not("user_id", "is", null);
+
+    // requested_at column exists in the latest migration. If the database still has
+    // old rows with null requested_at, the frontend will safely fall back to
+    // created_at/inserted_at below.
+    const { data: requests, error } = await query.order("requested_at", { ascending: false, nullsFirst: false });
 
     if (error) return res.status(400).json({ error: error.message });
 
-    const userIds = [...new Set((requests || []).map((r) => r.user_id))];
-    let profileMap = {};
+    const userIds = [...new Set((requests || []).map((r) => r.user_id).filter(Boolean))];
+    const profileMap = {};
+
     if (userIds.length > 0) {
+      // profiles table does not have an email column in this project. Email is in Supabase Auth,
+      // so never select profiles.email here.
       const { data: profiles, error: profilesErr } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, phone, email")
+        .select("id, full_name, phone, company_name, role")
         .in("id", userIds);
+
       if (profilesErr) return res.status(400).json({ error: profilesErr.message });
-      (profiles || []).forEach((p) => { profileMap[p.id] = p; });
+      (profiles || []).forEach((p) => { profileMap[p.id] = { ...p, email: null }; });
+
+      await Promise.all(userIds.map(async (userId) => {
+        try {
+          const authResult = await supabaseAdmin.auth.admin.getUserById(userId);
+          const email = authResult?.data?.user?.email || null;
+          if (!profileMap[userId]) profileMap[userId] = { id: userId, email };
+          else profileMap[userId].email = email;
+        } catch (authError) {
+          console.warn("[RoleSwitch] auth email lookup failed:", userId, authError?.message || authError);
+        }
+      }));
     }
 
-    const items = (requests || []).map((r) => ({ ...r, user: profileMap[r.user_id] || null }));
+    const items = (requests || []).map((r) => ({
+      ...r,
+      requested_at: r.requested_at || r.created_at || r.inserted_at || null,
+      user: profileMap[r.user_id] || null,
+    }));
+
     return res.json({ items });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
@@ -3747,7 +3772,7 @@ app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, re
 
     const { data: userProfile } = await supabaseAdmin
       .from("profiles")
-      .select("full_name, email, phone, expo_push_token, notif_sound_enabled, notif_sound_name")
+      .select("full_name, phone, expo_push_token, notif_sound_enabled, notif_sound_name")
       .eq("id", switchReq.user_id)
       .maybeSingle();
 
@@ -3760,7 +3785,7 @@ app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, re
     }
 
     await sendRoleSwitchApprovedEmail(
-      userProfile?.email || authEmail,
+      authEmail,
       userProfile?.full_name || "İstifadəçi",
       switchReq.company_name || ""
     );
