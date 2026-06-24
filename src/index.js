@@ -84,6 +84,32 @@ async function sendDeletionEmail(toEmail, fullName, reason) {
 }
 
 
+async function sendRoleSwitchApprovedEmail(toEmail, fullName, companyName) {
+  if (!SMTP_HOST || !SMTP_USER || !toEmail) {
+    console.warn("Role switch approval email skipped", { hasSmtp: Boolean(SMTP_HOST && SMTP_USER), toEmail });
+    return;
+  }
+
+  const safeName = fullName || "İstifadəçi";
+  const companyText = companyName ? ` (${companyName})` : "";
+  try {
+    await mailer.sendMail({
+      from: SMTP_FROM,
+      to: toEmail,
+      subject: "ASIMOS - İşəgötürən profiliniz aktivləşdirildi",
+      text: `Salam ${safeName},
+
+Sorğunuz admin tərəfindən təsdiqləndi. Siz artıq ASIMOS-da işəgötürən olaraq profilinizdən istifadə edə bilərsiniz${companyText}.
+
+Hörmətlə,
+Asimos Komandası`,
+      html: `<p>Salam <b>${safeName}</b>,</p><p>Sorğunuz admin tərəfindən təsdiqləndi. Siz artıq ASIMOS-da <b>işəgötürən</b> olaraq profilinizdən istifadə edə bilərsiniz${companyText}.</p><p>Hörmətlə,<br/>Asimos Komandası</p>`,
+    });
+  } catch (e) {
+    console.error("Role switch approval email failed:", e?.message || e);
+  }
+}
+
 async function sendProfileChangeDecisionEmail(toEmail, fullName, decision, fieldLabel, oldValue, newValue, reason = "") {
   if (!SMTP_HOST || !SMTP_USER || !toEmail) {
     console.warn("Profile change decision email skipped", { hasSmtp: Boolean(SMTP_HOST && SMTP_USER), toEmail });
@@ -3616,7 +3642,7 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
 
     await notifyAdmins(
       "Rol dəyişikliyi sorğusu",
-      `${profile.full_name || "İstifadəçi"} iş axtarandan işçi axtarana keçmək istəyir (${cleanCompany})`,
+      `${profile.full_name || "İstifadəçi"} iş axtarandan işəgötürən olmaq istəyir (${cleanCompany})`,
       { type: "role_switch_request", requestId: switchReq.id, userId }
     );
 
@@ -3632,7 +3658,7 @@ app.post("/me/request-role-switch", requireAuth, async (req, res) => {
       ok: true,
       pending: true,
       requestId: switchReq.id,
-      message: "Sorğunuz admina göndərildi. Təsdiqləndikdən sonra hesabınız işçi axtarana keçiriləcək.",
+      message: "Sorğunuz admina göndərildi. Təsdiqləndikdən sonra hesabınız işəgötürən profilinə keçiriləcək.",
     });
   } catch (e) {
     console.error("[RoleSwitch]", e);
@@ -3645,7 +3671,7 @@ app.get("/me/role-switch-status", requireAuth, async (req, res) => {
     const userId = req.authUser.id;
     const { data } = await supabaseAdmin
       .from("role_switch_requests")
-      .select("id, from_role, to_role, status, reviewer_note, requested_at, reviewed_at, company_name")
+      .select("id, from_role, to_role, status, reviewer_note, requested_at, reviewed_at, company_name, category, voen")
       .eq("user_id", userId)
       .order("requested_at", { ascending: false })
       .limit(1)
@@ -3674,7 +3700,7 @@ app.get("/admin/role-switch-requests", requireAdmin, async (req, res) => {
     if (userIds.length > 0) {
       const { data: profiles, error: profilesErr } = await supabaseAdmin
         .from("profiles")
-        .select("id, full_name, phone")
+        .select("id, full_name, phone, email")
         .in("id", userIds);
       if (profilesErr) return res.status(400).json({ error: profilesErr.message });
       (profiles || []).forEach((p) => { profileMap[p.id] = p; });
@@ -3701,15 +3727,18 @@ app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, re
     if (fetchErr || !switchReq) return res.status(404).json({ error: "Sorğu tapılmadı" });
     if (switchReq.status !== "pending") return res.status(400).json({ error: "Sorğu artıq işlənib" });
 
-    await supabaseAdmin
+    const { error: profileUpdateErr } = await supabaseAdmin
       .from("profiles")
       .update({
         role: switchReq.to_role,
         company_name: switchReq.company_name || null,
         category: switchReq.category || null,
+        voen: switchReq.voen || null,
         status: "active",
       })
       .eq("id", switchReq.user_id);
+
+    if (profileUpdateErr) return res.status(400).json({ error: profileUpdateErr.message });
 
     await supabaseAdmin
       .from("role_switch_requests")
@@ -3718,14 +3747,28 @@ app.post("/admin/role-switch-requests/:id/approve", requireAdmin, async (req, re
 
     const { data: userProfile } = await supabaseAdmin
       .from("profiles")
-      .select("expo_push_token, notif_sound_enabled, notif_sound_name")
+      .select("full_name, email, phone, expo_push_token, notif_sound_enabled, notif_sound_name")
       .eq("id", switchReq.user_id)
       .maybeSingle();
+
+    let authEmail = null;
+    try {
+      const authResult = await supabaseAdmin.auth.admin.getUserById(switchReq.user_id);
+      authEmail = authResult?.data?.user?.email || null;
+    } catch (emailLookupError) {
+      console.warn("[RoleSwitch] auth email lookup failed:", emailLookupError?.message || emailLookupError);
+    }
+
+    await sendRoleSwitchApprovedEmail(
+      userProfile?.email || authEmail,
+      userProfile?.full_name || "İstifadəçi",
+      switchReq.company_name || ""
+    );
 
     const historyRow = {
       user_id: switchReq.user_id,
       title: "Rol dəyişikliyi təsdiqləndi ✓",
-      body: "Hesabınız işçi axtaran kimi aktivləşdirildi. Tətbiqdən çıxıb yenidən daxil olun.",
+      body: "Hesabınız işəgötürən kimi aktivləşdirildi. Profilinizi yeniləyin və elan yerləşdirməyə başlayın.",
       data: { type: "role_switch_approved" },
     };
 

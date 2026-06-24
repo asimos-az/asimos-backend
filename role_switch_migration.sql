@@ -1,6 +1,6 @@
 -- Role switch requests
 -- Seeker → Employer: admin approval required
--- Employer → Seeker: immediate (no approval), deletes all employer data
+-- Employer → Seeker: immediate (no approval), deletes employer data
 
 CREATE TABLE IF NOT EXISTS public.role_switch_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -17,8 +17,20 @@ CREATE TABLE IF NOT EXISTS public.role_switch_requests (
 );
 
 ALTER TABLE public.role_switch_requests
+  ADD COLUMN IF NOT EXISTS company_name TEXT,
+  ADD COLUMN IF NOT EXISTS voen TEXT,
+  ADD COLUMN IF NOT EXISTS category TEXT,
+  ADD COLUMN IF NOT EXISTS reviewer_note TEXT,
+  ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS company_name TEXT,
+  ADD COLUMN IF NOT EXISTS category TEXT,
   ADD COLUMN IF NOT EXISTS voen TEXT;
 
 CREATE INDEX IF NOT EXISTS role_switch_requests_user_id_idx ON public.role_switch_requests (user_id);
 CREATE INDEX IF NOT EXISTS role_switch_requests_status_idx ON public.role_switch_requests (status);
 CREATE INDEX IF NOT EXISTS role_switch_requests_requested_at_idx ON public.role_switch_requests (requested_at DESC);
+
+NOTIFY pgrst, 'reload schema';
