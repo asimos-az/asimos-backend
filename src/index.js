@@ -2104,6 +2104,7 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
     }
 
     const is_daily = !!body.is_daily;
+    const adminJobType = normalizeJobType(body.job_type || body.jobType, is_daily);
     const notify_radius_m = body.notify_radius_m !== undefined && body.notify_radius_m !== null && body.notify_radius_m !== ""
       ? Number(body.notify_radius_m)
       : null;
@@ -2135,8 +2136,8 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       contact_link: (body.contact_link || body.link || body.contactLink || body.ats_link || body.atsLink) ? String(body.contact_link || body.link || body.contactLink || body.ats_link || body.atsLink).trim() : null,
       ats_link: (body.ats_link || body.atsLink || body.contact_link || body.link || body.contactLink) ? String(body.ats_link || body.atsLink || body.contact_link || body.link || body.contactLink).trim() : null,
       workplace: (body.workplace || body.workplace_name || body.branch) ? String(body.workplace || body.workplace_name || body.branch).trim() : null,
-      vacancy_start_date: (body.vacancy_start_date || body.vacancyStartDate) ? String(body.vacancy_start_date || body.vacancyStartDate).slice(0, 10) : null,
-      vacancy_end_date: (body.vacancy_end_date || body.vacancyEndDate) ? String(body.vacancy_end_date || body.vacancyEndDate).slice(0, 10) : null,
+      vacancy_start_date: adminJobType === "temporary" && (body.vacancy_start_date || body.vacancyStartDate) ? String(body.vacancy_start_date || body.vacancyStartDate).slice(0, 10) : null,
+      vacancy_end_date: adminJobType === "temporary" && (body.vacancy_end_date || body.vacancyEndDate) ? String(body.vacancy_end_date || body.vacancyEndDate).slice(0, 10) : null,
       contact_visibility: body.contact_visibility || body.contactVisibility || null,
       primary_contact: (body.primary_contact || body.primaryContact) ? String(body.primary_contact || body.primaryContact).trim() : null,
       voen: body.voen ? String(body.voen).trim() : null,
@@ -2146,9 +2147,9 @@ app.post("/admin/jobs", requireAdmin, async (req, res) => {
       location_lng: Number.isFinite(location_lng) ? location_lng : null,
       location_address: body.location_address ? String(body.location_address) : null,
       status: body.status ? String(body.status) : "open",
-      job_type: normalizeJobType(body.job_type || body.jobType, is_daily),
-      duration_days: body.duration_days ? Number(body.duration_days) : (is_daily ? 1 : null),
-      starts_at: body.starts_at ? new Date(body.starts_at).toISOString() : null,
+      job_type: adminJobType,
+      duration_days: adminJobType === "temporary" ? (body.duration_days ? Number(body.duration_days) : 1) : null,
+      starts_at: adminJobType === "temporary" && body.starts_at ? new Date(body.starts_at).toISOString() : null,
       working_hours: body.working_hours ? String(body.working_hours).trim() : null,
       job_level: (body.job_level || body.jobLevel || body.positionLevel || body.level) ? String(body.job_level || body.jobLevel || body.positionLevel || body.level).trim() : null,
       company_name: (body.company_name || body.companyName || emp.company_name) ? String(body.company_name || body.companyName || emp.company_name).trim() : null,
@@ -4747,8 +4748,8 @@ app.post("/jobs", requireAuth, async (req, res) => {
       contact_link: (contactLink || atsLink || ats_link || link) ? String(contactLink || atsLink || ats_link || link).trim() : null,
       ats_link: (atsLink || ats_link || contactLink || link) ? String(atsLink || ats_link || contactLink || link).trim() : null,
       workplace: (workplace || workplace_name) ? String(workplace || workplace_name).trim() : null,
-      vacancy_start_date: (vacancyStartDate || vacancy_start_date) ? String(vacancyStartDate || vacancy_start_date).slice(0, 10) : null,
-      vacancy_end_date: (vacancyEndDate || vacancy_end_date) ? String(vacancyEndDate || vacancy_end_date).slice(0, 10) : null,
+      vacancy_start_date: jt === "temporary" && (vacancyStartDate || vacancy_start_date) ? String(vacancyStartDate || vacancy_start_date).slice(0, 10) : null,
+      vacancy_end_date: jt === "temporary" && (vacancyEndDate || vacancy_end_date) ? String(vacancyEndDate || vacancy_end_date).slice(0, 10) : null,
       contact_visibility: contactVisibility || contact_visibility || null,
       primary_contact: (primaryContact || primary_contact) ? String(primaryContact || primary_contact).trim() : null,
       voen: voen ? String(voen).trim() : null,
@@ -5032,6 +5033,14 @@ app.patch("/jobs/:id", requireAuth, async (req, res) => {
     if (existingStatus === "rejected") {
       allowed.status = "pending";
       allowed.rejection_reason = null;
+    }
+
+    const nextUpdateJobType = allowed.job_type || existing.job_type || (allowed.is_daily || existing.is_daily ? "temporary" : "permanent");
+    if (nextUpdateJobType !== "temporary") {
+      allowed.vacancy_start_date = null;
+      allowed.vacancy_end_date = null;
+      allowed.duration_days = null;
+      allowed.starts_at = null;
     }
 
     Object.keys(allowed).forEach((k) => allowed[k] === undefined && delete allowed[k]);
