@@ -2019,6 +2019,7 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
     const q = (req.query.q || "").toString().trim();
     const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
+    const status = (req.query.status || "").toString().trim().toLowerCase();
 
     let query = supabaseAdmin
       .from("jobs")
@@ -2029,6 +2030,11 @@ app.get("/admin/jobs", requireAdmin, async (req, res) => {
     if (q) {
       const safe = q.replaceAll(",", " ").trim();
       query = query.or(`title.ilike.%${safe}%,category.ilike.%${safe}%,description.ilike.%${safe}%`);
+    }
+
+    if (status && status !== "all") {
+      if (status === "closed") query = query.in("status", ["closed", "inactive"]);
+      else query = query.eq("status", status);
     }
 
     const { data, error } = await query;
@@ -2331,10 +2337,15 @@ app.patch("/admin/jobs/:id", requireAdmin, async (req, res) => {
 app.delete("/admin/jobs/:id", requireAdmin, async (req, res) => {
   try {
     const id = req.params.id;
-    const { error } = await supabaseAdmin.from("jobs").delete().eq("id", id);
+    const { data: job, error } = await supabaseAdmin
+      .from("jobs")
+      .update({ status: "deleted", closed_at: new Date().toISOString(), closed_reason: "deleted_by_admin" })
+      .eq("id", id)
+      .select("*")
+      .single();
     if (error) return res.status(400).json({ error: error.message });
-    await logEvent("admin_job_deleted", null, { job_id: id });
-    return res.json({ ok: true });
+    await logEvent("admin_job_deleted", null, { job_id: id, mode: "soft_delete" });
+    return res.json({ ok: true, job });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Server error" });
   }
