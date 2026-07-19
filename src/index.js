@@ -2982,7 +2982,7 @@ app.get("/me", requireAuth, async (req, res) => {
 
 app.patch("/me/profile", requireAuth, async (req, res) => {
   try {
-    const { fullName, phone, location, companyName, logoUrl } = req.body || {};
+    const { fullName, phone, location, companyName } = req.body || {};
     const updates = {};
     if (typeof fullName === "string" && fullName.trim().length >= 2) updates.full_name = fullName.trim();
     if (typeof phone === "string" && phone.trim().length >= 5) updates.phone = phone.trim();
@@ -2991,7 +2991,6 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
     const currentProfile = await getProfile(req.authUser.id);
     if (currentProfile?.role === "employer") {
       if (companyName !== undefined) updates.company_name = String(companyName || "").trim() || null;
-      if (logoUrl !== undefined) updates.logo_url = logoUrl ? String(logoUrl).trim() : null;
     }
 
     if (!Object.keys(updates).length) return res.status(400).json({ error: "Yenilənəcək məlumat yoxdur" });
@@ -5584,8 +5583,8 @@ const PROFILE_CHANGE_FIELD_MAP = {
   whatsapp: { column: "whatsapp", label: "WhatsApp" },
   contactEmail: { column: "contact_email", label: "E-poçt" },
   contact_email: { column: "contact_email", label: "E-poçt" },
-  atsLink: { column: "ats_link", label: "ATS linki" },
-  ats_link: { column: "ats_link", label: "ATS linki" },
+  atsLink: { column: "ats_link", label: "Daxili CV bazası" },
+  ats_link: { column: "ats_link", label: "Daxili CV bazası" },
 };
 
 function normalizeChangeRequestField(fieldKey) {

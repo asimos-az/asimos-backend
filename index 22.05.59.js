@@ -5550,8 +5550,8 @@ const PROFILE_CHANGE_FIELD_MAP = {
   whatsapp: { column: "whatsapp", label: "WhatsApp" },
   contactEmail: { column: "contact_email", label: "E-poçt" },
   contact_email: { column: "contact_email", label: "E-poçt" },
-  atsLink: { column: "ats_link", label: "ATS linki" },
-  ats_link: { column: "ats_link", label: "ATS linki" },
+  atsLink: { column: "ats_link", label: "Daxili CV bazası" },
+  ats_link: { column: "ats_link", label: "Daxili CV bazası" },
 };
 
 function normalizeChangeRequestField(fieldKey) {
