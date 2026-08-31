@@ -4679,20 +4679,23 @@ app.post("/jobs", requireAuth, async (req, res) => {
       status,
     } = req.body || {};
 
-    if (!title) return res.status(400).json({ error: "Title required" });
+    const requestedStatus = String(status || "").toLowerCase();
+    const isDraft = Boolean(saveAsDraft || requestedStatus === "draft");
+    const resolvedTitle = String(title || "").trim() || (isDraft ? "Adsız qaralama" : "");
+    if (!resolvedTitle) return res.status(400).json({ error: "Title required" });
 
     // Force jobType='seeker' if user is seeker
     const forcedType = profile.role === "seeker" ? "seeker" : jobType;
     const jt = normalizeJobType(forcedType, !!isDaily);
     let dDays = null;
-    if (jt === "temporary") {
+    if (jt === "temporary" && !isDraft) {
       dDays = toNum(durationDays);
       if (!dDays || dDays < 1 || dDays > 365) {
         return res.status(400).json({ error: "durationDays required (1-365) for temporary job" });
       }
     }
 
-    const expiresAt = computeExpiresAt(jt, dDays || 1);
+    const expiresAt = isDraft ? null : computeExpiresAt(jt, dDays || 1);
 
     let locLat = toNum(location?.lat);
     let locLng = toNum(location?.lng);
@@ -4721,10 +4724,9 @@ app.post("/jobs", requireAuth, async (req, res) => {
       .eq("created_by", req.authUser.id)
       .in("status", ["open", "closed"]);
 
-    const requestedStatus = String(status || "").toLowerCase();
     // Employer-created jobs must wait for admin approval before appearing publicly.
     // Drafts stay private; every publish request becomes pending.
-    let initialStatus = (saveAsDraft || requestedStatus === "draft") ? "draft" : "pending";
+    let initialStatus = isDraft ? "draft" : "pending";
 
     const selectedPublishAt = published_at || publishedAt || publish_at || publishAt;
 
@@ -4737,7 +4739,7 @@ app.post("/jobs", requireAuth, async (req, res) => {
     const payload = {
       created_by: req.authUser.id,
       status: initialStatus,
-      title,
+      title: resolvedTitle,
       category: category || null,
       description: description || "",
       wage: wage || null,
