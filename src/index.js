@@ -1271,6 +1271,8 @@ function profileToUser(profile, authUser) {
     location: profile?.location || null,
     notifSoundEnabled: profile?.notif_sound_enabled ?? true,
     notifSoundName: profile?.notif_sound_name || "default",
+    seekerProfile: profile?.seeker_profile || {},
+    seeker_profile: profile?.seeker_profile || {},
   };
 }
 
@@ -2982,13 +2984,17 @@ app.get("/me", requireAuth, async (req, res) => {
 
 app.patch("/me/profile", requireAuth, async (req, res) => {
   try {
-    const { fullName, phone, location, companyName } = req.body || {};
+    const { fullName, phone, location, companyName, seekerProfile, seeker_profile } = req.body || {};
     const updates = {};
     if (typeof fullName === "string" && fullName.trim().length >= 2) updates.full_name = fullName.trim();
     if (typeof phone === "string" && phone.trim().length >= 5) updates.phone = phone.trim();
     if (location && typeof location === "object") updates.location = location;
 
     const currentProfile = await getProfile(req.authUser.id);
+    const nextSeekerProfile = seekerProfile || seeker_profile;
+    if (currentProfile?.role === "seeker" && nextSeekerProfile && typeof nextSeekerProfile === "object" && !Array.isArray(nextSeekerProfile)) {
+      updates.seeker_profile = nextSeekerProfile;
+    }
     if (currentProfile?.role === "employer") {
       if (companyName !== undefined) updates.company_name = String(companyName || "").trim() || null;
     }
