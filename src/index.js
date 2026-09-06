@@ -240,9 +240,10 @@ app.get("/site-stats", async (req, res) => {
     sevenDaysAgo.setDate(now.getDate() - 6);
     sevenDaysAgo.setHours(0, 0, 0, 0);
 
-    const [usersRes, jobsRes, onlineRes, todayRes, monthRes, visitsRes] = await Promise.all([
+    const [usersRes, jobsRes, companiesRes, onlineRes, todayRes, monthRes, visitsRes] = await Promise.all([
       supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }),
       supabaseAdmin.from("jobs").select("id", { count: "exact", head: true }).eq("status", "open"),
+      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).eq("role", "employer").not("company_name", "is", null),
       supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).gte("last_seen_at", onlineSince.toISOString()),
       supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", todayStart.toISOString()),
       supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", monthStart.toISOString()),
@@ -267,6 +268,7 @@ app.get("/site-stats", async (req, res) => {
       users: usersRes.count || 0,
       totalUsers: usersRes.count || 0,
       activeJobs: jobsRes.count || 0,
+      companies: companiesRes.error ? 0 : (companiesRes.count || 0),
       onlineUsers: onlineRes.error ? 0 : (onlineRes.count || 0),
       visitsToday: todayRes.error ? 0 : (todayRes.count || 0),
       visitsThisMonth: monthRes.error ? 0 : (monthRes.count || 0),
@@ -3951,6 +3953,103 @@ app.delete("/me/alerts/:id", requireAuth, async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Public company directory. Only fields intended for public display are returned;
+// contact details and the rest of the employer profile stay private.
+app.get("/companies", async (req, res) => {
+  try {
+    const page = Math.max(1, Math.trunc(toNum(req.query.page) || 1));
+    const limit = Math.min(100, Math.max(1, Math.trunc(toNum(req.query.limit) || 24)));
+    const search = String(req.query.q || "").trim().toLocaleLowerCase("az");
+
+    const [profilesRes, jobsRes] = await Promise.all([
+      supabaseAdmin
+        .from("profiles")
+        .select("id, company_name, logo_url, category, location, status, created_at")
+        .eq("role", "employer")
+        .not("company_name", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(2000),
+      supabaseAdmin
+        .from("jobs")
+        .select("created_by, company_name, company_logo_url, image_url, category, location_address")
+        .eq("status", "open")
+        .limit(5000),
+    ]);
+
+    if (profilesRes.error) return res.status(400).json({ error: profilesRes.error.message });
+    if (jobsRes.error) return res.status(400).json({ error: jobsRes.error.message });
+
+    const companiesById = new Map();
+    const companyIdByName = new Map();
+    const normalizeName = (value) => String(value || "").trim().toLocaleLowerCase("az");
+
+    for (const profile of profilesRes.data || []) {
+      const name = String(profile.company_name || "").trim();
+      if (!name) continue;
+      const item = {
+        id: profile.id,
+        companyName: name,
+        logoUrl: profile.logo_url || "",
+        category: profile.category || "Müxtəlif sahələr",
+        location: profile.location || null,
+        verified: !["blocked", "rejected", "deleted"].includes(String(profile.status || "").toLowerCase()),
+        activeJobs: 0,
+      };
+      companiesById.set(String(profile.id), item);
+      companyIdByName.set(normalizeName(name), String(profile.id));
+    }
+
+    for (const job of jobsRes.data || []) {
+      const name = String(job.company_name || "").trim();
+      if (!name) continue;
+      const creatorId = job.created_by ? String(job.created_by) : "";
+      const knownId = (creatorId && companiesById.has(creatorId))
+        ? creatorId
+        : companyIdByName.get(normalizeName(name));
+      const key = knownId || `job:${normalizeName(name)}`;
+      let item = companiesById.get(key);
+      if (!item) {
+        item = {
+          id: creatorId || key,
+          companyName: name,
+          logoUrl: job.company_logo_url || job.image_url || "",
+          category: job.category || "Müxtəlif sahələr",
+          location: job.location_address ? { address: job.location_address } : null,
+          verified: false,
+          activeJobs: 0,
+        };
+        companiesById.set(key, item);
+        companyIdByName.set(normalizeName(name), key);
+      }
+      item.activeJobs += 1;
+      if (!item.logoUrl) item.logoUrl = job.company_logo_url || job.image_url || "";
+      if ((!item.category || item.category === "Müxtəlif sahələr") && job.category) item.category = job.category;
+      if (!item.location && job.location_address) item.location = { address: job.location_address };
+    }
+
+    const allItems = Array.from(companiesById.values())
+      .filter((item) => {
+        if (!search) return true;
+        const haystack = [item.companyName, item.category, item.location?.address, item.location?.city]
+          .filter(Boolean)
+          .join(" ")
+          .toLocaleLowerCase("az");
+        return haystack.includes(search);
+      })
+      .sort((a, b) => (b.activeJobs - a.activeJobs) || a.companyName.localeCompare(b.companyName, "az"));
+
+    const offset = (page - 1) * limit;
+    return res.json({
+      items: allItems.slice(offset, offset + limit),
+      total: allItems.length,
+      page,
+      limit,
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
