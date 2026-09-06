@@ -3976,7 +3976,7 @@ app.get("/companies", async (req, res) => {
         .limit(2000),
       supabaseAdmin
         .from("jobs")
-        .select("created_by, company_name, company_logo_url, image_url, category, location_address")
+        .select("created_by, company_name, company_logo_url, image_url, category, location_address, is_daily, expires_at, created_at, published_at")
         .eq("status", "open")
         .limit(5000),
     ]);
@@ -4005,6 +4005,13 @@ app.get("/companies", async (req, res) => {
     }
 
     for (const job of jobsRes.data || []) {
+      const nowMs = Date.now();
+      const expiresMs = job.expires_at ? new Date(job.expires_at).getTime() : null;
+      const createdMs = job.created_at ? new Date(job.created_at).getTime() : null;
+      const publishedMs = job.published_at ? new Date(job.published_at).getTime() : null;
+      if (publishedMs !== null && publishedMs > nowMs) continue;
+      if (expiresMs !== null && expiresMs <= nowMs) continue;
+      if (expiresMs === null && !job.is_daily && createdMs !== null && createdMs <= nowMs - (28 * MS_DAY)) continue;
       const name = String(job.company_name || "").trim();
       if (!name) continue;
       const creatorId = job.created_by ? String(job.created_by) : "";
@@ -4049,6 +4056,87 @@ app.get("/companies", async (req, res) => {
       total: allItems.length,
       page,
       limit,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/companies/:id", async (req, res) => {
+  try {
+    const companyId = String(req.params.id || "").trim();
+    if (!companyId) return res.status(400).json({ error: "Şirkət ID-si tələb olunur" });
+
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .select("id, company_name, logo_url, category, location, status, created_at")
+      .eq("id", companyId)
+      .eq("role", "employer")
+      .maybeSingle();
+
+    if (profileError) return res.status(400).json({ error: profileError.message });
+    if (!profile?.company_name) return res.status(404).json({ error: "Şirkət tapılmadı" });
+
+    const nowIso = new Date().toISOString();
+    const { data: rows, error: jobsError } = await supabaseAdmin
+      .from("jobs")
+      .select("*")
+      .eq("created_by", companyId)
+      .eq("status", "open")
+      .or(`published_at.is.null,published_at.lte.${nowIso}`)
+      .order("created_at", { ascending: false })
+      .limit(1000);
+
+    if (jobsError) return res.status(400).json({ error: jobsError.message });
+
+    const nowMs = Date.now();
+    const jobs = (rows || []).filter((job) => {
+      const expiresMs = job.expires_at ? new Date(job.expires_at).getTime() : null;
+      const createdMs = job.created_at ? new Date(job.created_at).getTime() : null;
+      if (expiresMs !== null && expiresMs <= nowMs) return false;
+      if (expiresMs === null && !job.is_daily && createdMs !== null && createdMs <= nowMs - (28 * MS_DAY)) return false;
+      return true;
+    }).map((job) => ({
+      id: job.id,
+      title: job.title,
+      category: job.category,
+      description: job.description,
+      wage: job.wage,
+      views: Number(job.views || 0),
+      companyName: job.company_name || profile.company_name,
+      company_name: job.company_name || profile.company_name,
+      isDaily: Boolean(job.is_daily),
+      is_daily: Boolean(job.is_daily),
+      jobType: job.job_type || (job.is_daily ? "temporary" : "permanent"),
+      job_type: job.job_type || (job.is_daily ? "temporary" : "permanent"),
+      jobLevel: job.job_level || job.position_level || job.level || null,
+      job_level: job.job_level || job.position_level || job.level || null,
+      createdAt: job.created_at,
+      created_at: job.created_at,
+      publishedAt: job.published_at,
+      published_at: job.published_at,
+      expiresAt: job.expires_at,
+      expires_at: job.expires_at,
+      status: "open",
+      location: {
+        lat: toNum(job.location_lat),
+        lng: toNum(job.location_lng),
+        address: job.location_address || profile.location?.address || null,
+      },
+    }));
+
+    return res.json({
+      company: {
+        id: profile.id,
+        companyName: profile.company_name,
+        logoUrl: profile.logo_url || "",
+        category: profile.category || "Müxtəlif sahələr",
+        location: profile.location || null,
+        verified: !["blocked", "rejected", "deleted"].includes(String(profile.status || "").toLowerCase()),
+        memberSince: profile.created_at || null,
+        activeJobs: jobs.length,
+      },
+      jobs,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
