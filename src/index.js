@@ -3815,9 +3815,9 @@ app.get("/me/alerts", requireAuth, async (req, res) => {
 
 app.post("/me/alerts", requireAuth, async (req, res) => {
   try {
-    const { query, min_wage, max_wage, job_type, location, radius_m, category } = req.body;
+    const { query, min_wage, max_wage, job_type, location, radius_m, category, replace } = req.body;
 
-    if (!query && !min_wage && !job_type && !location) {
+    if (!query && !min_wage && !max_wage && !job_type && !location && !category) {
       return res.status(400).json({ error: "Ən azı bir kriteriya seçilməlidir (açar söz, maaş, növ və ya məkan)." });
     }
 
@@ -3832,6 +3832,11 @@ app.post("/me/alerts", requireAuth, async (req, res) => {
       radius_m: Number(radius_m) || null,
       category: category ? String(category).trim() : null,
     };
+
+    if (replace) {
+      const { error: deleteError } = await supabaseAdmin.from("job_alerts").delete().eq("user_id", req.authUser.id);
+      if (deleteError) return res.status(400).json({ error: deleteError.message });
+    }
 
     const { data, error } = await supabaseAdmin
       .from("job_alerts")
@@ -5662,7 +5667,8 @@ async function processJobAlerts(job) {
       if (alert.max_wage && (job.wage || 0) > alert.max_wage) continue;
 
       if (alert.query) {
-        if (!jobTxt.includes(alert.query.toLowerCase())) continue;
+        const terms = alert.query.split(",").map((term) => term.trim().toLowerCase()).filter(Boolean);
+        if (terms.length && !terms.some((term) => jobTxt.includes(term))) continue;
       }
 
       if (alert.location_lat && alert.location_lng) {
@@ -6267,6 +6273,7 @@ cron.schedule("0 8,19 * * *", () => {
 cron.schedule("* * * * *", async () => {
   try {
     await activateScheduledJobs();
+    await processNotificationQueue();
   } catch (e) {
     console.error("[scheduled-jobs-cron] Error:", e?.message || e);
   }
