@@ -47,3 +47,25 @@ Run `supabase_migrations.sql` in Supabase SQL editor. It adds:
 - `PATCH /admin/jobs/:id`
 - `DELETE /admin/jobs/:id`
 - `GET /admin/events`
+
+### Registration OTP delivery
+
+Registration and resend use the same 60-second per-email cooldown. If `SMTP_HOST`,
+`SMTP_USER`, `SMTP_PASS` and a sender (`SMTP_FROM`, falling back to `SMTP_USER`) are
+configured, the backend generates a Supabase email OTP and sends a numeric code
+through that SMTP provider. SMTP acceptance is required before reporting success;
+provider rejection and timeouts return an error. Acceptance does not guarantee inbox delivery.
+
+Without backend SMTP, delivery uses Supabase Auth's configured mail service. In
+that mode, configure Custom SMTP in Supabase and include `{{ .Token }}` in the
+Magic Link email template. Check sender/domain verification and provider logs if
+messages are absent. Never log OTPs, auth links or SMTP credentials.
+
+`phone` is required and `whatsapp` is optional; both accept Azerbaijani local and
+international formats and are stored as `+994…`. An omitted/empty WhatsApp remains
+null. The existing `profiles.phone` and `profiles.whatsapp` columns are used;
+no database migration is needed.
+
+Run registration regression checks with `node --test src/registration.test.js`.
+The in-process cooldown resets on restart; use a shared rate limiter before
+running multiple backend instances.

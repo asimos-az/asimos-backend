@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { normalizeContactNumber, createOtpSender } from "./registration.js";
 import express from "express";
 import { createServer } from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -15,9 +16,12 @@ const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = process.env.SMTP_PORT || 587;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
-const SMTP_FROM = process.env.SMTP_FROM || "no-reply@asimos.local";
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
 
 const mailer = nodemailer.createTransport({
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: Number(SMTP_PORT) === 465, // true for 465, false for other ports
@@ -1678,7 +1682,8 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
       role: patch.role,
       full_name: patch.full_name,
       company_name: patch.company_name,
-      phone: patch.phone,
+      phone: patch.phone === undefined ? undefined : normalizeContactNumber(patch.phone, true),
+      whatsapp: patch.whatsapp === undefined ? undefined : normalizeContactNumber(patch.whatsapp),
       location: patch.location,
       expo_push_token: patch.expo_push_token,
       status: patch.status,
@@ -1718,7 +1723,7 @@ app.patch("/admin/users/:id", requireAdmin, async (req, res) => {
     await logEvent("admin_user_updated", null, { target_user_id: id, patch: allowed });
     return res.json({ ok: true, user: data });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(e.status || 500).json({ error: e.message || "Server error" });
   }
 });
 
@@ -2592,124 +2597,36 @@ app.get("/admin/events", requireAdmin, async (req, res) => {
 
 
 
-app.post("/auth/register", async (req, res) => {
-  try {
-    const {
-      role, // seeker | employer
-      fullName,
-      companyName,
-      email,
-      password,
-      phone,
-      location,
-      category,
-      logoUrl,
-      profileLogoUrl,
-    } = req.body || {};
-
-    if (!email || !password || !fullName || !role) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-    if (!["seeker", "employer"].includes(role)) {
-      return res.status(400).json({ error: "Invalid role" });
-    }
-
-    const cleanEmail = String(email).trim().toLowerCase();
-
-    // Do not send OTP if this email already has an account.
-    const existingAuthUser = await findAuthUserByEmail(cleanEmail);
-    if (existingAuthUser) {
-      return res.status(409).json({ error: "Bu hesab (email) artıq qeydiyyatdan keçib." });
-    }
-
-    const { data, error } = await supabaseAnon.auth.signInWithOtp({
-      email: cleanEmail,
-      options: {
-        shouldCreateUser: true,
-        data: {
-          role,
-          fullName,
-          companyName: role === "employer" ? (companyName || null) : null,
-          logoUrl: role === "employer" ? (logoUrl || profileLogoUrl || null) : null,
-          phone: phone || null,
-          location: location || null,
-        },
-      },
-    });
-
-    if (error) {
-      const msg = error.message || "Auth error";
-      const lower = msg.toLowerCase();
-      if (lower.includes("rate") && lower.includes("limit")) {
-        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
-      }
-      return res.status(400).json({ error: msg });
-    }
-
-    const otpUserId = data?.user?.id;
-    if (otpUserId) {
-      // Prevent cross-role registration with the same email/account.
-      const { data: existingProfileByUserId } = await supabaseAdmin
-        .from("profiles")
-        .select("id, role")
-        .eq("id", otpUserId)
-        .maybeSingle();
-
-      if (existingProfileByUserId?.role && existingProfileByUserId.role !== role) {
-        return res.status(409).json({
-          error: `Bu email artıq '${existingProfileByUserId.role}' kimi qeydiyyatdan keçib. Eyni email ilə fərqli rol üçün qeydiyyat olmaz.`,
-        });
-      }
-
-      try {
-        const existing = data.user.user_metadata || {};
-        await supabaseAdmin.auth.admin.updateUserById(otpUserId, {
-          user_metadata: {
-            ...existing,
-            role,
-            fullName,
-            companyName: role === "employer" ? (companyName || null) : null,
-            logoUrl: role === "employer" ? (logoUrl || profileLogoUrl || null) : null,
-            phone: phone || null,
-            location: location || null,
-            category: role === "employer" ? (category || null) : null,
-          },
-        });
-      } catch { }
-
-      try {
-        // Create profile only if missing; never override an existing role at register step.
-        if (!existingProfileByUserId) {
-          await supabaseAdmin.from("profiles").insert({
-            id: otpUserId,
-            role,
-            full_name: fullName,
-            company_name: role === "employer" ? (companyName || null) : null,
-            logo_url: role === "employer" ? (logoUrl || profileLogoUrl || null) : null,
-            phone: phone || null,
-            location: location || null,
-            category: role === "employer" ? (category || null) : null,
-          });
-        }
-      } catch { }
-    }
-
-    await logEvent("auth_register_request", otpUserId || null, { email: cleanEmail, role, hasCompanyName: !!companyName });
-
-    return res.json({
-      ok: true,
-      needsOtp: true,
-      email: cleanEmail,
-      message: "OTP sorğusu göndərildi. Əgər emaildə 6 rəqəmli kod görünmürsə, Supabase Dashboard > Auth > Email Templates > Magic Link template-inə {{ .Token }} əlavə edin. Email ümumiyyətlə gəlmirsə, Supabase-də Custom SMTP qoşmaq lazımdır (deliverability).",
-      token: null,
-      refreshToken: null,
-      user: data?.user ? profileToUser(null, data.user) : null,
-    });
-  } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
-  }
+const sendRegistrationOtp = createOtpSender({
+  admin: supabaseAdmin, anon: supabaseAnon, mailer,
+  smtpConfigured: Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM), from: SMTP_FROM,
 });
 
+app.post("/auth/register", async (req, res) => {
+  try {
+    const { role, fullName, companyName, email, password, phone, whatsapp, location, category, logoUrl, profileLogoUrl } = req.body || {};
+    const cleanEmail = String(email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || typeof password !== "string" || password.length < 8 || (typeof fullName !== "string" || fullName.trim().length < 2)) {
+      return res.status(400).json({ error: "Ad, düzgün e-poçt və ən azı 8 simvolluq şifrə daxil edin." });
+    }
+    if (!["seeker", "employer"].includes(role)) return res.status(400).json({ error: "Hesab növünü seçin." });
+    const cleanPhone = normalizeContactNumber(phone, true);
+    const cleanWhatsapp = normalizeContactNumber(whatsapp);
+    const existing = await findAuthUserByEmail(cleanEmail);
+    if (existing?.email_confirmed_at) return res.status(409).json({ error: "Bu e-poçt artıq qeydiyyatdan keçib. Hesabınıza daxil olun." });
+    // An interrupted, unconfirmed registration can request a fresh code.
+    // Profile and password changes are applied only after email ownership is verified.
+    const metadata = { role, fullName: fullName.trim(), phone: cleanPhone, whatsapp: cleanWhatsapp,
+      companyName: role === "employer" ? companyName || null : null,
+      logoUrl: role === "employer" ? logoUrl || profileLogoUrl || null : null,
+      category: role === "employer" ? category || null : null, location: location || null };
+    await sendRegistrationOtp(cleanEmail, metadata, true);
+    await logEvent("auth_register_request", existing?.id || null, { email: cleanEmail, role });
+    return res.json({ ok: true, needsOtp: true, email: cleanEmail, message: "Təsdiq kodu e-poçt ünvanınıza göndərildi.", token: null, refreshToken: null });
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: e.status ? e.message : "Qeydiyyat alınmadı. Yenidən cəhd edin." });
+  }
+});
 
 
 app.get("/geo/search", async (req, res) => {
@@ -2781,9 +2698,13 @@ app.post("/auth/login", async (req, res) => {
 
 app.post("/auth/verify-otp", async (req, res) => {
   try {
-    const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, location: locationFromReq, logoUrl: logoUrlFromReq, profileLogoUrl: profileLogoUrlFromReq } = req.body || {};
+    const { email, code, password, role: roleFromReq, fullName: fullNameFromReq, companyName: companyNameFromReq, phone: phoneFromReq, whatsapp: whatsappFromReq, location: locationFromReq, logoUrl: logoUrlFromReq, profileLogoUrl: profileLogoUrlFromReq } = req.body || {};
     if (!email || !code) return res.status(400).json({ error: "Missing fields" });
-    if (!password) return res.status(400).json({ error: "Password required" });
+    if (typeof password !== "string" || password.length < 8) return res.status(400).json({ error: "Şifrə ən azı 8 simvol olmalıdır" });
+    const existingAuth = await findAuthUserByEmail(email);
+    const normalizedPhone = normalizeContactNumber(phoneFromReq ?? existingAuth?.user_metadata?.phone, true);
+    const normalizedWhatsapp = normalizeContactNumber(whatsappFromReq === undefined ? existingAuth?.user_metadata?.whatsapp : whatsappFromReq);
+    if (existingAuth?.email_confirmed_at) return res.status(409).json({ error: "Hesab artıq təsdiqlənib. Daxil olun və ya şifrənizi bərpa edin." });
 
     const cleanCode = String(code).replace(/\s+/g, "").trim();
     if (!/^\d{6,8}$/.test(cleanCode)) {
@@ -2800,7 +2721,7 @@ app.post("/auth/verify-otp", async (req, res) => {
       const msg = error.message || "Auth error";
       const lower = msg.toLowerCase();
       if (lower.includes("rate") && lower.includes("limit")) {
-        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
+        return res.status(429).json({ error: "Çox sayda cəhd edildi. Bir qədər sonra yenidən yoxlayın." });
       }
       return res.status(400).json({ error: msg });
     }
@@ -2814,7 +2735,8 @@ app.post("/auth/verify-otp", async (req, res) => {
 
     const finalFullName = String(fullNameFromReq ?? md.fullName ?? "");
     const finalCompanyName = finalRole === "employer" ? (companyNameFromReq ?? md.companyName ?? null) : null;
-    const finalPhone = phoneFromReq ?? md.phone ?? null;
+    const finalPhone = normalizedPhone;
+    const finalWhatsapp = normalizedWhatsapp;
     const finalLogoUrl = finalRole === "employer" ? (logoUrlFromReq ?? profileLogoUrlFromReq ?? md.logoUrl ?? null) : null;
     const finalLocation = locationFromReq ?? md.location ?? null;
 
@@ -2827,6 +2749,7 @@ app.post("/auth/verify-otp", async (req, res) => {
           companyName: finalCompanyName,
           logoUrl: finalLogoUrl,
           phone: finalPhone,
+          whatsapp: finalWhatsapp,
           location: finalLocation,
         },
       });
@@ -2855,7 +2778,9 @@ app.post("/auth/verify-otp", async (req, res) => {
       company_name: finalCompanyName,
       logo_url: finalLogoUrl,
       phone: finalPhone,
+      whatsapp: finalWhatsapp,
       location: finalLocation,
+      category: finalRole === "employer" ? (req.body.category || md.category || null) : null,
       status: finalRole === "employer" ? "pending" : "active",
     });
 
@@ -2893,35 +2818,22 @@ app.post("/auth/verify-otp", async (req, res) => {
       user: profileToUser(profile, signin.user),
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(e.status || 500).json({ error: e.message || "Server error" });
   }
 });
 
 app.post("/auth/resend-otp", async (req, res) => {
   try {
-    const { email } = req.body || {};
-    if (!email) return res.status(400).json({ error: "email required" });
-
-    const { error } = await supabaseAnon.auth.signInWithOtp({
-      email,
-      options: { shouldCreateUser: true },
-    });
-
-    if (error) {
-      const msg = error.message || "Auth error";
-      const lower = msg.toLowerCase();
-      if (lower.includes("rate") && lower.includes("limit")) {
-        return res.status(429).json({ error: "Email göndərmə limiti dolub. Biraz sonra yenidən yoxla və ya Supabase-də SMTP qoş." });
-      }
-      return res.status(400).json({ error: msg });
-    }
-    return res.json({ ok: true, message: "OTP kod yenidən göndərildi" });
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Düzgün e-poçt ünvanı daxil edin." });
+    const existing = await findAuthUserByEmail(email);
+    if (!existing || existing.email_confirmed_at) return res.status(400).json({ error: "Qeydiyyat səhifəsindən davam edin və ya hesabınıza daxil olun." });
+    await sendRegistrationOtp(email);
+    return res.json({ ok: true, message: "Təsdiq kodu yenidən göndərildi." });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(e.status || 500).json({ error: e.status ? e.message : "Kod göndərilmədi. Yenidən cəhd edin." });
   }
 });
-
-
 
 app.post("/auth/refresh", async (req, res) => {
   try {
@@ -2986,10 +2898,11 @@ app.get("/me", requireAuth, async (req, res) => {
 
 app.patch("/me/profile", requireAuth, async (req, res) => {
   try {
-    const { fullName, phone, location, companyName, seekerProfile, seeker_profile } = req.body || {};
+    const { fullName, phone, whatsapp, location, companyName, seekerProfile, seeker_profile } = req.body || {};
     const updates = {};
     if (typeof fullName === "string" && fullName.trim().length >= 2) updates.full_name = fullName.trim();
-    if (typeof phone === "string" && phone.trim().length >= 5) updates.phone = phone.trim();
+    if (phone !== undefined) updates.phone = normalizeContactNumber(phone, true);
+    if (whatsapp !== undefined) updates.whatsapp = normalizeContactNumber(whatsapp);
     if (location && typeof location === "object") updates.location = location;
 
     const currentProfile = await getProfile(req.authUser.id);
@@ -3010,7 +2923,7 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
     await logEvent("profile_update", req.authUser.id, { fields: Object.keys(updates) });
     return res.json({ ok: true, user: profileToUser(profile, req.authUser) });
   } catch (e) {
-    return res.status(500).json({ error: e.message || "Server error" });
+    return res.status(e.status || 500).json({ error: e.message || "Server error" });
   }
 });
 
