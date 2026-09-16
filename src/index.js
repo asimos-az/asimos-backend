@@ -6712,6 +6712,32 @@ async function readJobFilterOptions() {
   return { ...normalizeJobFilterOptions(parsed), updated_at: data?.updated_at || null };
 }
 
+const DEFAULT_AZERBAIJAN_CITIES = [
+  "Abşeron", "Ağcabədi", "Ağdam", "Ağdaş", "Ağdərə", "Ağstafa", "Ağsu", "Astara", "Babək", "Bakı", "Balakən", "Beyləqan", "Bərdə", "Biləsuvar", "Cəbrayıl", "Cəlilabad", "Culfa", "Daşkəsən", "Füzuli", "Gədəbəy", "Gəncə", "Goranboy", "Göyçay", "Göygöl", "Hacıqabul", "Xankəndi", "Xaçmaz", "Xızı", "Xocalı", "Xocavənd", "Xudat", "İmişli", "İsmayıllı", "Kəlbəcər", "Kəngərli", "Kürdəmir", "Laçın", "Lerik", "Lənkəran", "Masallı", "Mingəçevir", "Naftalan", "Naxçıvan", "Neftçala", "Oğuz", "Ordubad", "Qax", "Qazax", "Qəbələ", "Qobustan", "Quba", "Qubadlı", "Qusar", "Saatlı", "Sabirabad", "Sədərək", "Şabran", "Şahbuz", "Şamaxı", "Şəmkir", "Şəki", "Şərur", "Şirvan", "Siyəzən", "Sumqayıt", "Şuşa", "Tərtər", "Tovuz", "Ucar", "Yardımlı", "Yevlax", "Zaqatala", "Zəngilan", "Zərdab",
+];
+
+function normalizeCityDirectory(items) {
+  const source = Array.isArray(items) ? items : [];
+  const seen = new Set();
+  const result = source.map((item) => String(item || "").trim().replace(/\s+/g, " "))
+    .filter((item) => {
+      const key = item.toLocaleLowerCase("az");
+      if (!item || item.length > 80 || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 200);
+  return result;
+}
+
+async function readCityDirectory() {
+  const { data, error } = await supabaseAdmin.from("content_pages").select("body, updated_at").eq("slug", "city-directory").maybeSingle();
+  if (error) throw error;
+  let parsed = {};
+  try { parsed = data?.body ? JSON.parse(data.body) : {}; } catch { parsed = {}; }
+  const items = normalizeCityDirectory(parsed.items);
+  return { items: items.length ? items : DEFAULT_AZERBAIJAN_CITIES, updated_at: data?.updated_at || null };
+}
+
 const DEFAULT_SOCIAL_LINKS = {
   facebook: "https://www.facebook.com/",
   instagram: "https://www.instagram.com/asimos_az",
@@ -6757,6 +6783,40 @@ async function readSiteSettings() {
   };
 }
 
+
+app.get("/cities", async (req, res) => {
+  try {
+    return res.json(await readCityDirectory());
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/admin/cities", requireAdmin, async (req, res) => {
+  try {
+    return res.json(await readCityDirectory());
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/admin/cities", requireAdmin, async (req, res) => {
+  try {
+    const items = normalizeCityDirectory(req.body?.items);
+    if (!items.length) return res.status(400).json({ error: "Ən azı bir şəhər və ya rayon saxlanmalıdır" });
+    const updatedAt = new Date().toISOString();
+    const { error } = await supabaseAdmin.from("content_pages").upsert({
+      slug: "city-directory",
+      title: "City Directory",
+      body: JSON.stringify({ items }),
+      updated_at: updatedAt,
+    });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ items, updated_at: updatedAt });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 app.get("/job-filter-options", async (req, res) => {
   try {
