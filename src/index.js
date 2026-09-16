@@ -4312,6 +4312,7 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         closedReason: (r.closed_reason ?? null),
         boostedUntil: (r.boosted_until ?? null),
         location: loc,
+        city: r.city || r.region || null,
       };
 
       if (baseLat !== null && baseLng !== null && typeof loc.lat === "number" && typeof loc.lng === "number") {
@@ -4325,10 +4326,11 @@ app.get("/jobs", optionalAuth, async (req, res) => {
         }
       }
 
-      // Apply city filter by stored address text. No extra DB column is required.
+      // City selection works with both explicit city metadata and legacy address-only records.
       if (cityFilter) {
-        const addressText = normalizeFilterText(job.location?.address || "");
-        if (!addressText.includes(normalizeFilterText(cityFilter))) return null;
+        const addressText = normalizeFilterText([job.city, job.location?.address].filter(Boolean).join(" "));
+        const selectedCity = normalizeFilterText(cityFilter);
+        if (!addressText.includes(selectedCity)) return null;
       }
 
       // Apply vacancy type filter. Supports old job_type values and newer UI labels.
