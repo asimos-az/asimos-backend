@@ -2932,23 +2932,27 @@ app.get("/employers/seekers/map", requireAuth, async (req, res) => {
     const viewer = await getProfile(req.authUser.id);
     if (viewer?.role !== "employer") return res.status(403).json({ error: "Yalnız işçi axtaranlar bu xəritəyə baxa bilər" });
 
-    const { data, error } = await supabaseAdmin
-      .from("profiles")
-      .select("location, seeker_profile")
-      .eq("role", "seeker")
-      .not("location", "is", null)
-      .limit(500);
-    if (error) return res.status(500).json({ error: error.message });
+    const rows = [];
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabaseAdmin
+        .from("profiles")
+        .select("location, seeker_profile")
+        .eq("role", "seeker")
+        .not("location", "is", null)
+        .range(offset, offset + 999);
+      if (error) return res.status(500).json({ error: error.message });
+      rows.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
 
-    const seekers = (data || []).flatMap((row, index) => {
+    const seekers = rows.flatMap((row, index) => {
       const preferences = row.seeker_profile && typeof row.seeker_profile === "object" ? row.seeker_profile : {};
-      if (preferences.showOnEmployerMap !== true) return [];
 
       const lat = toNum(row.location?.lat);
       const lng = toNum(row.location?.lng);
       if (lat === null || lng === null || !isValidLatLng(lat, lng)) return [];
 
-      // Round to roughly neighborhood-level precision; do not expose home addresses or contact details.
+      // Show anonymous, neighborhood-level positions; never return identity, addresses, or contact details.
       return [{
         id: `candidate-${index + 1}`,
         lat: Number(lat.toFixed(2)),
