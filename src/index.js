@@ -244,15 +244,21 @@ app.get("/site-stats", async (req, res) => {
     sevenDaysAgo.setDate(now.getDate() - 6);
     sevenDaysAgo.setHours(0, 0, 0, 0);
 
-    const [usersRes, jobsRes, companiesRes, onlineRes, todayRes, monthRes, visitsRes] = await Promise.all([
+    const [usersRes, seekersRes, jobsRes, employersRes, onlineRes, todayRes, monthRes, visitsRes, cityDirectory] = await Promise.all([
       supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }),
+      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).eq("role", "seeker"),
       supabaseAdmin.from("jobs").select("id", { count: "exact", head: true }).eq("status", "open"),
-      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).eq("role", "employer").not("company_name", "is", null),
+      supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).eq("role", "employer"),
       supabaseAdmin.from("profiles").select("id", { count: "exact", head: true }).gte("last_seen_at", onlineSince.toISOString()),
       supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", todayStart.toISOString()),
       supabaseAdmin.from("site_visits").select("id", { count: "exact", head: true }).gte("created_at", monthStart.toISOString()),
       supabaseAdmin.from("site_visits").select("created_at").gte("created_at", sevenDaysAgo.toISOString()).limit(5000),
+      readCityDirectory(),
     ]);
+
+    for (const [name, result] of [["users", usersRes], ["seekers", seekersRes], ["jobs", jobsRes], ["employers", employersRes]]) {
+      if (result.error) throw new Error(`Could not load ${name} statistic: ${result.error.message}`);
+    }
 
     const days = [];
     for (let i = 0; i < 7; i += 1) {
@@ -271,15 +277,18 @@ app.get("/site-stats", async (req, res) => {
     return res.json({
       users: usersRes.count || 0,
       totalUsers: usersRes.count || 0,
+      seekers: seekersRes.count || 0,
       activeJobs: jobsRes.count || 0,
-      companies: companiesRes.error ? 0 : (companiesRes.count || 0),
+      employers: employersRes.count || 0,
+      cities: cityDirectory.items.length,
       onlineUsers: onlineRes.error ? 0 : (onlineRes.count || 0),
       visitsToday: todayRes.error ? 0 : (todayRes.count || 0),
       visitsThisMonth: monthRes.error ? 0 : (monthRes.count || 0),
       dailyVisits: days.map((date) => ({ date, count: dayCounts[date] || 0 })),
     });
   } catch (e) {
-    return res.json({ users: 0, totalUsers: 0, activeJobs: 0, onlineUsers: 0, visitsToday: 0, visitsThisMonth: 0, dailyVisits: [] });
+    console.error("[site-stats] Failed to load public statistics:", e?.message || e);
+    return res.status(500).json({ error: "Statistikaları yükləmək mümkün olmadı" });
   }
 });
 
