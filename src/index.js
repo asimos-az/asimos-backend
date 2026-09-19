@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { createCareerRouter } from './career.js';
 import { normalizeContactNumber, createOtpSender } from "./registration.js";
 import express from "express";
 import { createServer } from "http";
@@ -200,6 +201,7 @@ io.on("connection", async (socket) => {
 });
 
 app.use(cors());
+app.use('/admin/career-articles', express.json({ limit: '256kb' }));
 app.use(express.json());
 
 
@@ -1440,6 +1442,7 @@ async function requireAnyAuth(req, res, next) {
   }
 }
 
+app.use(createCareerRouter({ db: supabaseAdmin, requireAdmin }));
 app.get("/health", (req, res) => res.json({ ok: true }));
 app.post("/admin/login", async (req, res) => {
   try {

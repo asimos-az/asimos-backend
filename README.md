@@ -69,3 +69,30 @@ no database migration is needed.
 Run registration regression checks with `node --test src/registration.test.js`.
 The in-process cooldown resets on restart; use a shared rate limiter before
 running multiple backend instances.
+
+## Career articles
+
+Run `supabase/migrations/20260919154428_career_articles.sql` after the existing
+schema migrations. It creates `career_articles` and three editable starter
+articles. The script is safe to rerun and does not overwrite existing articles.
+RLS is enabled, and direct access is revoked from `anon` and `authenticated`;
+all content is served through this backend using its server-only service role.
+
+- `GET /career-articles?page=1&limit=12&q=CV&category=CV`: published summaries,
+  total count, server-side search/pagination. Featured articles appear first.
+- `GET /career-articles/:slug`: published article; drafts return 404.
+- `GET /admin/career-articles`: admin listing, including drafts; optional `status`.
+- `GET /admin/career-articles/:id`: full article for editing.
+- `POST /admin/career-articles`: create; defaults to draft.
+- `PUT /admin/career-articles/:id`: update the complete editable article.
+- `DELETE /admin/career-articles/:id`: delete.
+
+Every admin route requires the existing admin Bearer token. Editable fields:
+`title`, `slug`, `excerpt`, `body`, `category`, `author`, `cover_url` (HTTPS or empty),
+`cover_style` (`mint`, `peach`, `blue`, `lilac`), `featured`, `status` (`draft`,
+`published`). Reading time is calculated automatically. Body content is plain
+text with blank-line-separated paragraphs, `##` headings, `-` lists, and `>`
+quotes; the website renders text safely without accepting raw HTML.
+
+Run `npm test` for registration and career API checks. Career tests use an
+in-memory database and an ephemeral localhost server, never production data.
