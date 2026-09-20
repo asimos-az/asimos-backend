@@ -2941,9 +2941,6 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
 
 app.get("/employers/seekers/map", requireAuth, async (req, res) => {
   try {
-    const viewer = await getProfile(req.authUser.id);
-    if (viewer?.role !== "employer") return res.status(403).json({ error: "Yalnız işçi axtaranlar bu xəritəyə baxa bilər" });
-
     const onlineSince = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const rows = [];
     for (let offset = 0; ; offset += 1000) {
