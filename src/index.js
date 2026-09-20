@@ -892,6 +892,10 @@ function isValidLatLng(lat, lng) {
   );
 }
 
+function isAzerbaijanCoordinate(lat, lng) {
+  return isValidLatLng(lat, lng) && lat >= 38.35 && lat <= 41.95 && lng >= 44.7 && lng <= 50.7;
+}
+
 
 
 function bbox(lat, lng, radiusM) {
@@ -2959,13 +2963,14 @@ app.get("/employers/seekers/map", requireAuth, async (req, res) => {
 
       const lat = toNum(row.location?.lat);
       const lng = toNum(row.location?.lng);
-      if (lat === null || lng === null || !isValidLatLng(lat, lng)) return [];
+      if (lat === null || lng === null || !isAzerbaijanCoordinate(lat, lng)) return [];
 
-      // Show anonymous, neighborhood-level positions; never return identity, addresses, or contact details.
+      // Keep seeker markers anonymous, but preserve the user-shared coordinate so
+      // the map does not move a valid point into the sea when rounding it.
       return [{
         id: `candidate-${index + 1}`,
-        lat: Number(lat.toFixed(2)),
-        lng: Number(lng.toFixed(2)),
+        lat,
+        lng,
         profession: String(preferences.profession || "İş axtaran").slice(0, 100),
         category: String(preferences.category || "Kateqoriya seçilməyib").slice(0, 80),
         district: String(preferences.district || "").slice(0, 80),
