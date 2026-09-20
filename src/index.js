@@ -2941,14 +2941,12 @@ app.patch("/me/profile", requireAuth, async (req, res) => {
 
 app.get("/employers/seekers/map", requireAuth, async (req, res) => {
   try {
-    const onlineSince = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const rows = [];
     for (let offset = 0; ; offset += 1000) {
       const { data, error } = await supabaseAdmin
         .from("profiles")
         .select("location, seeker_profile")
         .eq("role", "seeker")
-        .gte("last_seen_at", onlineSince)
         .not("location", "is", null)
         .range(offset, offset + 999);
       if (error) return res.status(500).json({ error: error.message });
