@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './health/health.controller';
 import { SupabaseModule } from './supabase/supabase.module';
+import { WhatsAppModule } from './whatsapp/whatsapp.module';
 
 @Module({
-  imports: [SupabaseModule],
+  imports: [SupabaseModule, WhatsAppModule],
   controllers: [HealthController],
 })
 export class AppModule {}
