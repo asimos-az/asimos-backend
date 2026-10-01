@@ -1,9 +1,13 @@
 import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { WhatsAppService } from './whatsapp.service';
 
 @Controller('whatsapp/webhook')
 export class WhatsAppController {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly whatsapp: WhatsAppService,
+  ) {}
 
   @Get()
   verify(
@@ -32,18 +36,27 @@ export class WhatsAppController {
         message?.interactive?.list_reply?.title ??
         null;
 
+      const { data: existingContact } = await this.supabase.db
+        .from('job_agent_contacts')
+        .select('id, role, current_step, onboarding_status')
+        .eq('whatsapp_phone', phone)
+        .maybeSingle();
+
+      const isNewContact = !existingContact;
+
       const { data: contact, error: contactError } = await this.supabase.db
         .from('job_agent_contacts')
         .upsert(
           {
             whatsapp_phone: phone,
             last_message_at: new Date().toISOString(),
-            current_step: 'role_selection',
-            onboarding_status: 'in_progress',
+            ...(isNewContact
+              ? { current_step: 'role_selection', onboarding_status: 'in_progress' }
+              : {}),
           },
           { onConflict: 'whatsapp_phone' },
         )
-        .select('id')
+        .select('id, role, current_step, onboarding_status')
         .single();
 
       if (contactError || !contact) continue;
@@ -60,17 +73,46 @@ export class WhatsAppController {
 
       if (!conversation) continue;
 
-      await this.supabase.db.from('job_agent_messages').upsert(
-        {
-          conversation_id: conversation.id,
-          provider_message_id: message?.id ?? null,
-          direction: 'inbound',
-          message_type: message?.type ?? 'text',
-          body,
-          payload: message,
-        },
-        { onConflict: 'provider_message_id' },
-      );
+      const { error: messageError } = await this.supabase.db
+        .from('job_agent_messages')
+        .upsert(
+          {
+            conversation_id: conversation.id,
+            provider_message_id: message?.id ?? null,
+            direction: 'inbound',
+            message_type: message?.type ?? 'text',
+            body,
+            payload: message,
+          },
+          { onConflict: 'provider_message_id' },
+        );
+
+      if (messageError) continue;
+
+      const buttonId =
+        message?.interactive?.button_reply?.id ??
+        message?.button?.payload ??
+        null;
+
+      if (buttonId === 'role_seeker') {
+        await this.supabase.db
+          .from('job_agent_contacts')
+          .update({ role: 'seeker', current_step: 'seeker_job_title' })
+          .eq('id', contact.id);
+        continue;
+      }
+
+      if (buttonId === 'role_employer') {
+        await this.supabase.db
+          .from('job_agent_contacts')
+          .update({ role: 'employer', current_step: 'employer_company_name' })
+          .eq('id', contact.id);
+        continue;
+      }
+
+      if (isNewContact || !contact.role || contact.current_step === 'role_selection') {
+        await this.whatsapp.sendRoleSelection(phone);
+      }
     }
 
     return { status: 'received' };
