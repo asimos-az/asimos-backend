@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Post, Query } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { WhatsAppService } from './whatsapp.service';
 
 @Controller('whatsapp/webhook')
 export class WhatsAppController {
+  private readonly logger = new Logger(WhatsAppController.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly whatsapp: WhatsAppService,
@@ -24,6 +26,14 @@ export class WhatsAppController {
   async receive(@Body() payload: any) {
     const changes = payload?.entry?.flatMap((entry: any) => entry?.changes ?? []) ?? [];
     const messages = changes.flatMap((change: any) => change?.value?.messages ?? []);
+    const statuses = changes.flatMap((change: any) => change?.value?.statuses ?? []);
+
+    for (const status of statuses) {
+      const errors = status?.errors ?? [];
+      this.logger.log(
+        `WhatsApp status id=${status?.id ?? 'unknown'} status=${status?.status ?? 'unknown'} recipient=${status?.recipient_id ?? 'unknown'} errors=${JSON.stringify(errors)}`,
+      );
+    }
 
     for (const message of messages) {
       const phone = message?.from;
